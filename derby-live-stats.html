@@ -1,0 +1,2011 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>Jam Tracker — Live Derby Stats</title>
+<!-- MQTT.js browser bundle (for live multi-device sync). Fails gracefully offline. -->
+<script src="https://unpkg.com/mqtt@5/dist/mqtt.min.js"></script>
+<style>
+  :root {
+    /* Muted grey + green, low-vision-accessible dark theme.
+       Accent text colors are chosen for >=4.5:1 contrast on the dark panels.
+       Home = green, Away = bronze/amber (kept distinguishable from green
+       across common color-vision differences). */
+    /* Light theme: grey + light-grey background gradient, green & orange accents.
+       Accent colors darkened enough for >=4.5:1 text contrast on white/light panels. */
+    --bg0: #c7cccf;       /* grey (gradient start) */
+    --bg1: #eceef0;       /* light grey (gradient end) */
+    --panel: #ffffff;     /* cards */
+    --panel2: #f1f3f4;    /* insets / fields */
+    --line: #cfd4d7;      /* borders */
+    --ink: #1e2422;       /* near-black text */
+    --muted: #5c6560;     /* secondary text */
+    --magenta: #2e9c63;   /* primary gradient (light green) */
+    --purple: #1c774a;    /* primary gradient (dark green) */
+    --teal: #2e9c63;      /* secondary green */
+    --gold: #c07a1c;      /* orange highlight */
+    --red: #c85a2a;       /* penalties / danger (orange-red) */
+    --good: #157a45;      /* positive (green) */
+    --bad: #c05a1a;       /* negative (orange) */
+    --home: #1f8a52;      /* your team (green) */
+    --away: #d0761d;      /* opponent (orange) */
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; }
+  body {
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+    color: var(--ink);
+    background: radial-gradient(1200px 600px at 80% -10%, rgba(31,138,82,0.10) 0%, transparent 55%),
+                radial-gradient(1000px 500px at -10% 110%, rgba(208,118,29,0.10) 0%, transparent 55%),
+                linear-gradient(160deg, var(--bg0), var(--bg1));
+    background-attachment: fixed;
+    min-height: 100vh;
+    padding-bottom: calc(120px + env(safe-area-inset-bottom));
+  }
+  header.app {
+    position: sticky; top: 0; z-index: 50;
+    background: rgba(255,255,255,0.9);
+    backdrop-filter: blur(10px);
+    border-bottom: 1px solid var(--line);
+    padding: 10px 14px;
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  }
+  .brand { display:flex; align-items:center; gap:10px; }
+  .brand .logo {
+    width: 34px; height: 34px; border-radius: 9px;
+    background: linear-gradient(135deg, var(--magenta), var(--purple));
+    display:grid; place-items:center; font-weight:900; font-size: 18px;
+    box-shadow: 0 4px 14px rgba(52,81,63,.6);
+  }
+  .brand h1 {
+    font-size: 1.05rem; font-weight: 800; letter-spacing: .4px; line-height:1;
+  }
+  .brand small { color: var(--muted); font-size: .68rem; letter-spacing:.5px; text-transform:uppercase; }
+  .score-strip { margin-left:auto; display:flex; align-items:center; gap:8px; }
+  .score-pill {
+    display:flex; flex-direction:column; align-items:center; min-width: 66px;
+    background: var(--panel2); border:1px solid var(--line); border-radius:10px; padding:4px 10px;
+  }
+  .score-pill .nm { font-size:.6rem; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; max-width:80px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+  .score-pill .sc { font-size:1.4rem; font-weight:900; line-height:1; }
+  .score-pill.home .sc { color: var(--home); }
+  .score-pill.away .sc { color: var(--away); }
+  .score-sep { color: var(--muted); font-weight:800; }
+
+  main { max-width: 1000px; margin: 0 auto; padding: 14px; }
+  .view { display: none; animation: fade .25s ease; }
+  .view.active { display: block; }
+  @keyframes fade { from { opacity:0; transform: translateY(6px);} to {opacity:1; transform:none;} }
+
+  .card {
+    background: linear-gradient(180deg, var(--panel), var(--panel2));
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 16px;
+    margin-bottom: 14px;
+    box-shadow: 0 8px 30px rgba(0,0,0,.28);
+  }
+  .card h2 { font-size: .95rem; letter-spacing:.4px; margin-bottom: 12px; display:flex; align-items:center; gap:8px; }
+  .card h2 .tag { font-size:.62rem; font-weight:700; padding:2px 8px; border-radius:999px; background: rgba(31,138,82,.12); color: var(--home); border:1px solid rgba(31,138,82,.35); text-transform:uppercase; letter-spacing:.6px;}
+  .sub { color: var(--muted); font-size:.78rem; margin-bottom:10px; }
+
+  .grid2 { display:grid; grid-template-columns: 1fr 1fr; gap:14px; }
+  @media (max-width:720px){ .grid2 { grid-template-columns: 1fr; } }
+
+  label.fld { display:block; font-size:.72rem; color:var(--muted); text-transform:uppercase; letter-spacing:.6px; margin:0 0 5px; }
+  input[type=text], input[type=number] {
+    width:100%; background: #f1f3f4; border:1px solid var(--line); color:var(--ink);
+    border-radius:10px; padding:10px 12px; font-size:1rem; outline:none;
+  }
+  input:focus { border-color: var(--teal); box-shadow:0 0 0 3px rgba(46,156,99,.25); }
+  input[type=color]{ width:44px; height:38px; border:none; background:none; border-radius:8px; padding:0; }
+
+  .btn {
+    border:none; cursor:pointer; border-radius:11px; font-weight:800; letter-spacing:.3px;
+    padding:11px 16px; font-size:.9rem; color:#fff; transition: transform .05s ease, filter .15s ease;
+    background: linear-gradient(135deg, var(--magenta), var(--purple));
+  }
+  .btn:active { transform: scale(.97); }
+  .btn.ghost { background: transparent; border:1px solid var(--line); color:var(--ink); }
+  .btn.teal { background: linear-gradient(135deg, var(--teal), #3f7d68); color:#0c1f15; }
+  .btn.gold { background: linear-gradient(135deg, var(--gold), #b0973f); color:#241a05; }
+  .btn.danger { background: linear-gradient(135deg, var(--red), #a44a41); }
+  .btn.sm { padding:7px 11px; font-size:.78rem; border-radius:9px; }
+  .btn.block { width:100%; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+  .row.end { justify-content:flex-end; }
+  .spacer { flex:1; }
+
+  .roster-list { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
+  .chip-skater {
+    display:flex; align-items:center; gap:7px; background:#f4f6f6; border:1px solid var(--line);
+    border-radius:999px; padding:5px 6px 5px 10px; font-size:.85rem;
+  }
+  .chip-skater .num { font-weight:900; color: var(--gold); }
+  .chip-skater .x { cursor:pointer; width:20px; height:20px; border-radius:50%; background:#e6e9ea; color:var(--muted); display:grid; place-items:center; font-size:.8rem; }
+  .chip-skater .x:hover { background: var(--red); color:#fff; }
+
+  /* team accent */
+  .team-home { --accent: var(--home); }
+  .team-away { --accent: var(--away); }
+  .team-head { display:flex; align-items:center; gap:8px; margin-bottom:8px; }
+  .team-dot { width:12px; height:12px; border-radius:50%; background: var(--accent); box-shadow:0 0 10px var(--accent); }
+  .team-name { font-weight:800; font-size:.95rem; }
+
+  /* Live lineup */
+  .laprow { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:10px; }
+  .jamctl { display:flex; align-items:center; gap:8px; }
+  .jam-badge { background: var(--panel2); border:1px solid var(--line); border-radius:12px; padding:6px 12px; text-align:center; }
+  .jam-badge b { font-size:1.2rem; display:block; line-height:1; }
+  .jam-badge span { font-size:.6rem; color:var(--muted); text-transform:uppercase; letter-spacing:.6px; }
+  .period-sel { display:flex; gap:6px; }
+  .period-sel .btn.on { border-color: var(--purple); color:#fff; background: linear-gradient(135deg, var(--magenta), var(--purple)); }
+
+  .pickgroup { margin-bottom:18px; }
+  .pickgroup .pl { font-size:.68rem; color:var(--muted); text-transform:uppercase; letter-spacing:.7px; margin-bottom:6px; display:flex; gap:8px; align-items:center;}
+  .pickgroup .pl .cnt { color:var(--accent); font-weight:800; }
+  /* extra spacing so the +P button, penalty badge, star and pivot bubbles that
+     overhang each square's corners never overlap neighboring squares */
+  .picks { display:flex; flex-wrap:wrap; gap:20px 16px; padding-top:8px; }
+  .pk {
+    position:relative; min-width:44px; padding:9px 10px; border-radius:11px; cursor:pointer;
+    background:#f4f6f6; border:1px solid var(--line); text-align:center; user-select:none;
+    transition: all .12s ease;
+  }
+  .pk .n { font-weight:900; font-size:1rem; }
+  .pk .nm2 { font-size:.58rem; color:var(--muted); max-width:70px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .pk.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 22%, #f4f6f6); box-shadow:0 0 0 2px color-mix(in srgb, var(--accent) 40%, transparent) inset; }
+  .pk.jam.on { border-color: var(--gold); background: rgba(192,122,28,.16); box-shadow:0 0 0 2px rgba(192,122,28,.5) inset; }
+  .pk .star { position:absolute; top:-7px; right:-6px; font-size:.8rem; filter: drop-shadow(0 1px 2px #000); }
+  .pk .pen-badge { position:absolute; top:-8px; left:-6px; background: var(--red); color:#fff; font-size:.6rem; font-weight:800; border-radius:999px; padding:1px 5px; }
+  .pivot-toggle { position:absolute; bottom:-8px; left:50%; transform:translateX(-50%); font-size:.55rem; background:#e6e9ea; border:1px solid var(--line); border-radius:6px; padding:0 4px; color:var(--muted);}
+  .pk.pivot .pivot-toggle { background: var(--purple); color:#fff; border-color:var(--purple); }
+
+  .pts-wrap { display:flex; align-items:center; gap:10px; margin-top:6px; }
+  .pts-val { font-size:2rem; font-weight:900; min-width:52px; text-align:center; color:var(--accent); }
+  .pts-btns { display:flex; gap:6px; flex-wrap:wrap; }
+  .pts-input { width:130px; margin-top:6px; font-size:1.7rem; font-weight:900; text-align:center; color:var(--accent);
+    background:#f1f3f4; border:1px solid var(--line); border-radius:12px; padding:8px 10px; }
+  .pts-input:focus { border-color:var(--accent); box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 25%, transparent); }
+  .lead-toggle { display:flex; align-items:center; gap:6px; font-size:.78rem; color:var(--muted); cursor:pointer; margin-top:8px;}
+  .lead-toggle input { width:18px; height:18px; accent-color: var(--gold); }
+
+  /* jam clock + lead control */
+  .clock-row { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:12px; }
+  .clock-display { font-size:2.4rem; font-weight:900; font-variant-numeric:tabular-nums; letter-spacing:1px; min-width:118px;
+    color:var(--gold); background:#eef1f2; border:1px solid var(--line); border-radius:12px; padding:6px 16px; text-align:center; }
+  .lead-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  .lead-label { font-size:.72rem; color:var(--muted); text-transform:uppercase; letter-spacing:.6px; }
+  .lead-btn .lb-name { font-weight:800; }
+  .lead-btn[data-lead="home"].sel { border-color:var(--home); color:var(--home); box-shadow:0 0 0 2px color-mix(in srgb,var(--home) 40%, transparent) inset; }
+  .lead-btn[data-lead="away"].sel { border-color:var(--away); color:var(--away); box-shadow:0 0 0 2px color-mix(in srgb,var(--away) 40%, transparent) inset; }
+  .tbl-scroll { overflow-x:auto; -webkit-overflow-scrolling:touch; }
+  .tbl-scroll table { min-width:520px; }
+  .jl-meta { font-size:.72rem; color:var(--muted); margin-left:6px; }
+  .jl-meta .lead-mark { color: var(--gold); font-weight:800; }
+
+  /* Track */
+  .track-wrap { position:relative; }
+  .track-svg { width:100%; height:auto; display:block; border-radius:14px; background:#eef1f2; border:1px solid var(--line); touch-action: manipulation; }
+  .track-legend { display:flex; gap:14px; flex-wrap:wrap; font-size:.72rem; color:var(--muted); margin-top:8px; align-items:center;}
+  .track-legend .k { display:inline-flex; align-items:center; gap:6px; }
+  .track-legend .dotk { width:12px; height:12px; border-radius:50%; }
+  .exit-mode { display:flex; gap:8px; margin-bottom:8px; }
+  .exit-mode .btn { flex:1; }
+  .exit-mode .btn.ghost.sel { border-color: var(--gold); color: var(--gold); box-shadow:0 0 0 2px rgba(192,122,28,.28) inset; }
+
+  /* Tables */
+  table { width:100%; border-collapse: collapse; font-size:.82rem; }
+  th, td { text-align:left; padding:8px 8px; border-bottom:1px solid var(--line); }
+  th { color:var(--muted); font-size:.66rem; text-transform:uppercase; letter-spacing:.6px; font-weight:700; }
+  td.num, th.num { text-align:right; font-variant-numeric: tabular-nums; }
+  .diff-pos { color: var(--good); font-weight:800; }
+  .diff-neg { color: var(--bad); font-weight:800; }
+  .pill-mini { display:inline-block; font-size:.66rem; padding:1px 7px; border-radius:999px; background:#e6e9ea; color:var(--muted); }
+  .empty { color:var(--muted); font-size:.85rem; padding:10px 2px; }
+
+  .barrow { display:flex; align-items:center; gap:8px; margin-bottom:6px; }
+  .barrow .lbl { width:120px; font-size:.8rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .bartrack { flex:1; height:16px; background:#f1f3f4; border-radius:8px; overflow:hidden; border:1px solid var(--line); }
+  .barfill { height:100%; background: linear-gradient(90deg, var(--gold), var(--red)); border-radius:8px; }
+  .barrow .val { width:34px; text-align:right; font-weight:800; font-size:.82rem; }
+
+  .seg { display:flex; background:#f1f3f4; border:1px solid var(--line); border-radius:10px; padding:3px; gap:3px; margin-bottom:12px; flex-wrap:wrap;}
+  .seg button { flex:1; min-width:90px; border:none; background:transparent; color:var(--muted); font-weight:700; padding:7px 8px; border-radius:8px; cursor:pointer; font-size:.78rem;}
+  .seg button.on { background: linear-gradient(135deg, var(--magenta), var(--purple)); color:#fff; }
+
+  .stat-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(120px,1fr)); gap:10px; }
+  .stat-box { background:#f4f6f6; border:1px solid var(--line); border-radius:12px; padding:12px; }
+  .stat-box .v { font-size:1.5rem; font-weight:900; }
+  .stat-box .l { font-size:.66rem; color:var(--muted); text-transform:uppercase; letter-spacing:.6px; }
+
+  /* bottom nav */
+  nav.tabs {
+    position: fixed; bottom:0; left:0; right:0; z-index:60;
+    display:flex; background: rgba(255,255,255,0.96); backdrop-filter: blur(10px);
+    border-top:1px solid var(--line);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  nav.tabs button {
+    flex:1; border:none; background:none; color:var(--muted); padding:10px 4px 12px;
+    font-size:.7rem; font-weight:700; cursor:pointer; display:flex; flex-direction:column; align-items:center; gap:3px;
+  }
+  nav.tabs button .ic { font-size:1.25rem; line-height:1; }
+  nav.tabs button.on { color: var(--ink); }
+  nav.tabs button.on .ic { filter: drop-shadow(0 0 8px var(--magenta)); }
+
+  .toast {
+    position: fixed; left:50%; bottom:78px; transform: translateX(-50%) translateY(20px);
+    background: var(--panel2); border:1px solid var(--purple); color:var(--ink);
+    padding:10px 18px; border-radius:12px; font-size:.85rem; font-weight:700;
+    opacity:0; pointer-events:none; transition: all .25s ease; z-index:100;
+    box-shadow: 0 10px 30px rgba(0,0,0,.4);
+  }
+  .toast.show { opacity:1; transform: translateX(-50%) translateY(0); }
+  .hint { font-size:.72rem; color:var(--muted); margin-top:6px; }
+  .danger-zone { border-color: rgba(208,119,107,.45); }
+  .jamlist { max-height: 320px; overflow:auto; }
+  .jamlist .jl {
+    display:flex; align-items:center; gap:10px; padding:8px; border-bottom:1px solid var(--line); font-size:.82rem;
+  }
+  .jamlist .jl .j-no { font-weight:900; width:52px; color:var(--muted); }
+  .jamlist .jl .j-sc { font-weight:900; }
+  .jamlist .jl .undo { margin-left:auto; }
+  /* ---- multi-device live sync ---- */
+  .sync-status { display:flex; align-items:center; gap:8px; font-size:.85rem; margin-bottom:12px; }
+  .sync-dot { width:11px; height:11px; border-radius:50%; background:var(--muted); flex:none; }
+  .sync-dot.live { background:var(--good); box-shadow:0 0 10px var(--good); }
+  .sync-dot.wait { background:var(--gold); box-shadow:0 0 10px var(--gold); }
+  .sync-dot.err  { background:var(--red); box-shadow:0 0 10px var(--red); }
+  .code-box { font-family: ui-monospace, "Cascadia Code", monospace; font-size:1.5rem; font-weight:900; letter-spacing:4px;
+    background:#eef1f2; border:1px solid var(--line); border-radius:10px; padding:8px 16px; color:var(--gold); }
+  .hdr-sync { display:none; align-items:center; gap:6px; font-size:.66rem; color:var(--muted); text-transform:uppercase; letter-spacing:.5px;
+    background: var(--panel2); border:1px solid var(--line); border-radius:999px; padding:4px 10px; }
+  .hdr-sync .sync-dot { width:9px; height:9px; }
+  .viewer-banner { display:none; background:linear-gradient(135deg, var(--teal), #3f7d68); color:#0c1f15; font-weight:800;
+    text-align:center; padding:9px 12px; border-radius:12px; margin-bottom:12px; letter-spacing:.3px; }
+  body.viewer .viewer-banner { display:block; }
+  /* viewer = read-only: disable input controls in live + setup (except the sync card) */
+  body.viewer #view-live .pk,
+  body.viewer #view-live .btn,
+  body.viewer #view-live input,
+  body.viewer #view-live .lead-btn,
+  body.viewer #view-live .track-svg,
+  body.viewer #view-setup input,
+  body.viewer #view-setup .btn,
+  body.viewer #view-setup .chip-skater .x { pointer-events:none; opacity:.6; }
+  body.viewer #syncCard .btn,
+  body.viewer #syncCard input { pointer-events:auto; opacity:1; }
+</style>
+</head>
+<body>
+<header class="app">
+  <div class="brand">
+    <div class="logo">J</div>
+    <div>
+      <h1>Jam Tracker</h1>
+      <small>Live WFTDA stat sheet</small>
+    </div>
+  </div>
+  <div class="hdr-sync" id="hdrSync"><span class="sync-dot" id="hdrSyncDot"></span><span id="hdrSyncText"></span></div>
+  <div class="score-strip">
+    <div class="score-pill home"><span class="nm" id="stripHomeName">Home</span><span class="sc" id="stripHomeScore">0</span></div>
+    <div class="score-sep">–</div>
+    <div class="score-pill away"><span class="nm" id="stripAwayName">Away</span><span class="sc" id="stripAwayScore">0</span></div>
+  </div>
+</header>
+
+<main>
+  <div class="viewer-banner">👀 Viewer mode — live from the scorekeeper. Read-only.</div>
+
+  <!-- ================= SETUP ================= -->
+  <section class="view" id="view-setup">
+    <div class="card">
+      <h2>Teams <span class="tag">Setup</span></h2>
+      <p class="sub">Name both teams and set colors. "Home" is your team — all the detailed insights (blocker pairs, packs, etc.) are built for your team.</p>
+      <div class="grid2">
+        <div class="team-home">
+          <div class="team-head"><span class="team-dot"></span><span class="team-name">Your team</span></div>
+          <label class="fld">Team name</label>
+          <div class="row">
+            <input type="text" id="homeName" placeholder="e.g. Rose City Rollers" />
+            <input type="color" id="homeColor" value="#1f8a52" title="Team color"/>
+          </div>
+        </div>
+        <div class="team-away">
+          <div class="team-head"><span class="team-dot"></span><span class="team-name">Opponent</span></div>
+          <label class="fld">Team name</label>
+          <div class="row">
+            <input type="text" id="awayName" placeholder="e.g. Gotham" />
+            <input type="color" id="awayColor" value="#d0761d" title="Team color"/>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" id="syncCard">
+      <h2>Connect a second device <span class="tag">Live sync</span></h2>
+      <p class="sub">One person scorekeeps and everyone else watches the stats update live on their own device. Needs internet on every device, and each device needs this page open (share the invite link, or copy the file over and enter the code).</p>
+      <div class="sync-status"><span class="sync-dot" id="syncDot"></span><span id="syncStatusText">Not connected</span></div>
+
+      <div id="syncSetup">
+        <label class="fld">Room code</label>
+        <div class="row">
+          <input type="text" id="roomInput" placeholder="e.g. DERBY7" maxlength="12" style="max-width:200px; text-transform:uppercase; letter-spacing:2px; font-weight:800" />
+          <button class="btn ghost sm" id="genCode">Generate</button>
+        </div>
+        <div class="row" style="margin-top:12px">
+          <button class="btn teal sm" id="hostBtn">📋 Host (scorekeeper)</button>
+          <button class="btn sm" id="joinBtn">👀 Join as viewer</button>
+        </div>
+      </div>
+
+      <div id="syncConnected" style="display:none">
+        <div class="row" style="align-items:center; gap:12px">
+          <span class="code-box" id="roomCodeShow">------</span>
+          <button class="btn ghost sm" id="copyCode">Copy code</button>
+          <button class="btn ghost sm" id="copyLink">Copy invite link</button>
+          <div class="spacer"></div>
+          <button class="btn danger sm" id="leaveBtn">Disconnect</button>
+        </div>
+        <p class="hint" id="roleHint"></p>
+      </div>
+      <p class="hint">Uses a free public message broker (EMQX). Anyone who knows your room code could read the feed, so keep the code private — it's fine for game stats, not for anything sensitive.</p>
+    </div>
+
+    <div class="grid2">
+      <div class="card team-home" id="rosterHomeCard">
+        <div class="team-head"><span class="team-dot"></span><span class="team-name" id="rosterHomeTitle">Your team</span></div>
+        <p class="sub">Add skaters by number + derby name.</p>
+        <div class="row">
+          <input type="text" id="homeAddNum" placeholder="#" style="max-width:70px" inputmode="numeric" />
+          <input type="text" id="homeAddName" placeholder="Skater name" />
+          <button class="btn teal sm" data-add="home">Add</button>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <label class="btn ghost sm" style="cursor:pointer">⬆ Import CSV<input type="file" class="csvRoster" data-csv="home" accept=".csv,text/csv" hidden></label>
+          <span class="hint" style="margin:0">Columns: name, number (header row optional)</span>
+        </div>
+        <div class="roster-list" id="homeRoster"></div>
+      </div>
+      <div class="card team-away" id="rosterAwayCard">
+        <div class="team-head"><span class="team-dot"></span><span class="team-name" id="rosterAwayTitle">Opponent</span></div>
+        <p class="sub">Add skaters by number + derby name.</p>
+        <div class="row">
+          <input type="text" id="awayAddNum" placeholder="#" style="max-width:70px" inputmode="numeric" />
+          <input type="text" id="awayAddName" placeholder="Skater name" />
+          <button class="btn teal sm" data-add="away">Add</button>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <label class="btn ghost sm" style="cursor:pointer">⬆ Import CSV<input type="file" class="csvRoster" data-csv="away" accept=".csv,text/csv" hidden></label>
+          <span class="hint" style="margin:0">Columns: name, number (header row optional)</span>
+        </div>
+        <div class="roster-list" id="awayRoster"></div>
+      </div>
+    </div>
+
+    <div class="card danger-zone">
+      <h2>Game data</h2>
+      <div class="row">
+        <button class="btn ghost sm" id="btnDemo">Load demo game</button>
+        <button class="btn ghost sm" id="btnExport">Export JSON</button>
+        <button class="btn ghost sm" id="btnExportCsv">Export jams (CSV)</button>
+        <label class="btn ghost sm" style="cursor:pointer">Import JSON<input type="file" id="importFile" accept="application/json" hidden></label>
+        <div class="spacer"></div>
+        <button class="btn danger sm" id="btnClearSkaters">Clear skaters</button>
+        <button class="btn danger sm" id="btnResetJams">Clear jams</button>
+        <button class="btn danger sm" id="btnResetAll">Reset all</button>
+      </div>
+      <p class="hint">Everything is saved automatically in this browser (localStorage). Export before switching devices. “Clear skaters” empties both rosters (keeps team names); “Clear jams” wipes the game (keeps skaters).</p>
+    </div>
+  </section>
+
+  <!-- ================= LIVE ================= -->
+  <section class="view" id="view-live">
+    <div class="card">
+      <div class="laprow">
+        <div class="jamctl">
+          <div class="period-sel">
+            <button class="btn ghost sm" data-period="1" id="periodBtn1">Period 1</button>
+            <button class="btn ghost sm" data-period="2" id="periodBtn2">Period 2</button>
+          </div>
+          <div class="jam-badge"><b id="curJam">1</b><span>Jam #</span></div>
+        </div>
+        <div class="jamctl">
+          <div class="score-pill home"><span class="nm" id="liveHomeName">Home</span><span class="sc" id="liveHomeScore">0</span></div>
+          <div class="score-sep">–</div>
+          <div class="score-pill away"><span class="nm" id="liveAwayName">Away</span><span class="sc" id="liveAwayScore">0</span></div>
+          <button class="btn danger sm" id="clearGameTop" style="margin-left:6px">Clear game</button>
+        </div>
+      </div>
+      <p class="hint" id="setupWarn" style="display:none; color:var(--gold)">Add skaters to both teams on the Setup tab first.</p>
+    </div>
+
+    <div class="card" id="clockCard">
+      <h2>Jam clock &amp; lead <span class="tag">Timing</span></h2>
+      <div class="clock-row">
+        <div class="clock-display" id="jamClock">0:00</div>
+        <button class="btn teal" id="clockToggle">Start jam</button>
+        <button class="btn ghost sm" id="clockReset">Reset</button>
+      </div>
+      <div class="lead-row">
+        <span class="lead-label">Lead jammer:</span>
+        <button class="btn ghost lead-btn" data-lead="home" id="leadHome">★ <span class="lb-name">Home</span></button>
+        <button class="btn ghost lead-btn" data-lead="away" id="leadAway">★ <span class="lb-name">Away</span></button>
+        <button class="btn ghost sm" data-lead="none" id="leadNone">No lead</button>
+      </div>
+      <div class="lead-row" style="margin-top:10px">
+        <span class="lead-label">Time&#8209;to&#8209;lead (sec):</span>
+        <input type="number" id="leadTimeInput" min="0" step="0.1" placeholder="—" style="max-width:110px" />
+        <span class="hint" style="margin:0">Auto-filled from the clock — type here to override or enter manually.</span>
+      </div>
+      <p class="hint" id="leadStatus">Tap “Start jam”, then tap who earned lead to capture time-to-lead.</p>
+    </div>
+
+    <div class="grid2" id="liveTeams"><!-- team panels injected --></div>
+
+    <div class="card">
+      <h2>Jammer exit — where did they break the pack?</h2>
+      <p class="sub">Tap the track to mark where each jammer got out of the pack this jam. This feeds the exit heat maps.</p>
+      <div class="exit-mode">
+        <button class="btn ghost sel" data-exit="home" id="exitBtnHome">Mark HOME jammer</button>
+        <button class="btn ghost" data-exit="away" id="exitBtnAway">Mark AWAY jammer</button>
+      </div>
+      <div class="track-wrap">
+        <svg class="track-svg" id="liveTrack" viewBox="0 0 400 240" preserveAspectRatio="xMidYMid meet"></svg>
+      </div>
+      <div class="track-legend">
+        <span class="k"><span class="dotk" style="background:var(--home)"></span> Home jammer exit</span>
+        <span class="k"><span class="dotk" style="background:var(--away)"></span> Away jammer exit</span>
+        <span class="k">Jammer &amp; pivot lines shown on the home straightaway</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="row">
+        <button class="btn gold" id="finishJam" style="flex:2">✓ Finish jam &amp; next</button>
+        <button class="btn ghost" id="clearJam" style="flex:1">Clear this jam</button>
+      </div>
+      <p class="hint">Finishing keeps the same lineups for the next jam so you only change what moved.</p>
+      <div class="row" style="margin-top:12px">
+        <button class="btn block" id="endGame">🏁 End game &amp; export</button>
+      </div>
+      <p class="hint">Exports your stats (CSV + JSON backup), then clears the sheet for the next game. Skater names are kept — use “Clear skaters” on Setup to reset rosters.</p>
+    </div>
+
+    <div class="card">
+      <h2>Recorded jams <span class="tag" id="jamCountTag">0</span></h2>
+      <div class="jamlist" id="jamList"><p class="empty">No jams recorded yet.</p></div>
+    </div>
+  </section>
+
+  <!-- ================= INSIGHTS ================= -->
+  <section class="view" id="view-insights">
+    <div class="card">
+      <h2>Scoreboard <span class="tag">Live</span></h2>
+      <div class="stat-grid" id="statGrid"></div>
+    </div>
+
+    <div class="card">
+      <h2>Penalty tracker</h2>
+      <div class="seg" id="penSeg">
+        <button class="on" data-penteam="home">Your team</button>
+        <button data-penteam="away">Opponent</button>
+      </div>
+      <div id="penBars"><p class="empty">No penalties logged.</p></div>
+    </div>
+
+    <div class="card">
+      <h2>Jammer exit heat maps</h2>
+      <p class="sub">Where jammers break out of the pack. Brighter = more often.</p>
+      <div class="grid2">
+        <div>
+          <div class="team-head team-home"><span class="team-dot"></span><span class="team-name" id="heatHomeTitle">Your jammers</span></div>
+          <svg class="track-svg" id="heatHome" viewBox="0 0 400 240" preserveAspectRatio="xMidYMid meet"></svg>
+        </div>
+        <div>
+          <div class="team-head team-away"><span class="team-dot"></span><span class="team-name" id="heatAwayTitle">Opponent jammers</span></div>
+          <svg class="track-svg" id="heatAway" viewBox="0 0 400 240" preserveAspectRatio="xMidYMid meet"></svg>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Jammer effectiveness</h2>
+      <div class="seg" id="jamSeg">
+        <button class="on" data-jamteam="home">Your team</button>
+        <button data-jamteam="away">Opponent</button>
+      </div>
+      <div id="jammerTable"></div>
+    </div>
+
+    <div class="card">
+      <h2>Lead battle &amp; timing</h2>
+      <p class="sub">Who earns lead, how fast (time-to-lead), and what lead is worth to your team.</p>
+      <div class="stat-grid" id="leadStatGrid"></div>
+      <div id="leadImpactTable" style="margin-top:12px"></div>
+    </div>
+
+    <div class="card">
+      <h2>Star pass impact <span class="tag">Your team</span></h2>
+      <p class="sub">Passing the panty to your pivot — how often, and how it pays off vs. jams without it.</p>
+      <div class="stat-grid" id="spStatGrid"></div>
+      <div id="spPivotTable" style="margin-top:12px"></div>
+    </div>
+
+    <div class="card team-home">
+      <h2><span class="team-dot"></span> Blocker effectiveness</h2>
+      <p class="sub">Net point differential per jam while this blocker was on the track (offense + defense). Higher is better.</p>
+      <div id="blockerTable"></div>
+    </div>
+
+    <div class="card team-home">
+      <h2><span class="team-dot"></span> Best blocker pairings</h2>
+      <p class="sub">Which of your blockers work best together — avg point differential per jam when both were on track (min 1 jam together).</p>
+      <div id="pairTable"></div>
+    </div>
+
+    <div class="card team-home">
+      <h2><span class="team-dot"></span> Most effective packs</h2>
+      <p class="sub">Your 4-blocker walls, ranked by net differential per jam.</p>
+      <div id="packTable"></div>
+    </div>
+
+    <div class="card">
+      <h2>Your packs vs their packs</h2>
+      <p class="sub">Matchups of your blocker wall against theirs, by your net differential.</p>
+      <div id="packVsTable"></div>
+    </div>
+
+    <div class="card">
+      <h2>Your jammers vs their packs</h2>
+      <p class="sub">Points your jammers scored against specific opposing walls.</p>
+      <div id="jammerVsTable"></div>
+    </div>
+
+    <div class="card">
+      <h2>Their packs vs our jammers</h2>
+      <p class="sub">How each opposing wall did against your jammers — points they held you to (lower = their pack more effective on defense).</p>
+      <div id="theirPackVsJammerTable"></div>
+    </div>
+  </section>
+</main>
+
+<nav class="tabs">
+  <button data-tab="setup"><span class="ic">👥</span>Setup</button>
+  <button class="on" data-tab="live"><span class="ic">⚡</span>Live Jam</button>
+  <button data-tab="insights"><span class="ic">📊</span>Insights</button>
+</nav>
+
+<div class="toast" id="toast"></div>
+
+<script>
+"use strict";
+
+/* ----------------------------- State ----------------------------- */
+const STORE_KEY = "derbyLiveStats_v1";
+const uid = () => Math.random().toString(36).slice(2, 9);
+
+const defaultState = () => ({
+  teams: {
+    home: { name: "", color: "#1f8a52", roster: [] },
+    away: { name: "", color: "#d0761d", roster: [] }
+  },
+  period: 1,
+  jamNumber: 1,
+  jams: [],                 // finished jams
+  current: freshJam(),      // jam being entered
+});
+
+function freshJam(prev) {
+  const base = () => ({ jammer: null, pivot: null, blockers: [], points: 0, lead: false, leadTime: null, starPass: false, penalties: {}, exit: null });
+  const j = { home: base(), away: base(), timer: { running: false, startedAt: null, accumMs: 0 } };
+  if (prev) {
+    // carry lineups forward, reset per-jam counters
+    for (const t of ["home", "away"]) {
+      j[t].jammer = prev[t].jammer;
+      j[t].pivot = prev[t].pivot;
+      j[t].blockers = [...prev[t].blockers];
+    }
+  }
+  return j;
+}
+
+let state = load();
+let exitMode = "home"; // which jammer we're marking on the live track
+let syncClient = null, syncRole = null, syncRoom = null, syncPubTimer = null, viewerMode = false;
+const SYNC_BROKER = "wss://broker.emqx.io:8084/mqtt";
+const SYNC_TOPIC = (r) => "derby-jamtracker/" + r;
+
+function load() {
+  try {
+    const raw = localStorage.getItem(STORE_KEY);
+    if (!raw) return defaultState();
+    const s = JSON.parse(raw);
+    // basic shape guard
+    if (!s.teams || !s.current) return defaultState();
+    return s;
+  } catch (e) { return defaultState(); }
+}
+function save() {
+  try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch (e) {}
+  syncPublish(); // broadcast to viewers if hosting (no-op otherwise)
+}
+
+/* ----------------------------- Helpers ----------------------------- */
+const $ = (id) => document.getElementById(id);
+function skater(team, id) { return state.teams[team].roster.find(s => s.id === id); }
+function skaterLabel(team, id) {
+  const s = skater(team, id);
+  return s ? s.number : "?";
+}
+function teamName(t) { return state.teams[t].name || (t === "home" ? "Home" : "Away"); }
+
+function toast(msg) {
+  const el = $("toast");
+  el.textContent = msg;
+  el.classList.add("show");
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => el.classList.remove("show"), 1600);
+}
+
+/* totals across finished jams (+ current if it has points) */
+function totalScore(team) {
+  let sum = 0;
+  for (const j of state.jams) sum += (j[team].points || 0);
+  sum += (state.current[team].points || 0);
+  return sum;
+}
+
+/* ----------------------------- Tabs ----------------------------- */
+function setTab(tab) {
+  document.querySelectorAll("nav.tabs button").forEach(b => b.classList.toggle("on", b.dataset.tab === tab));
+  document.querySelectorAll(".view").forEach(v => v.classList.remove("active"));
+  $("view-" + tab).classList.add("active");
+  if (tab === "insights") renderInsights();
+  if (tab === "live") renderLive();
+  if (tab === "setup") renderSetup();
+}
+document.querySelectorAll("nav.tabs button").forEach(b =>
+  b.addEventListener("click", () => setTab(b.dataset.tab)));
+
+/* ----------------------------- Setup rendering ----------------------------- */
+function applyTeamColors() {
+  document.documentElement.style.setProperty("--home", state.teams.home.color);
+  document.documentElement.style.setProperty("--away", state.teams.away.color);
+}
+
+function renderSetup() {
+  $("homeName").value = state.teams.home.name;
+  $("awayName").value = state.teams.away.name;
+  $("homeColor").value = state.teams.home.color;
+  $("awayColor").value = state.teams.away.color;
+  $("rosterHomeTitle").textContent = teamName("home") + " (you)";
+  $("rosterAwayTitle").textContent = teamName("away");
+  renderRoster("home");
+  renderRoster("away");
+}
+
+function renderRoster(team) {
+  const wrap = $(team + "Roster");
+  const r = state.teams[team].roster;
+  if (!r.length) { wrap.innerHTML = '<p class="empty">No skaters yet.</p>'; return; }
+  wrap.innerHTML = "";
+  r.slice().sort((a,b)=> (parseInt(a.number)||0)-(parseInt(b.number)||0)).forEach(s => {
+    const c = document.createElement("div");
+    c.className = "chip-skater";
+    c.innerHTML = `<span class="num">#${escapeHtml(s.number)}</span><span>${escapeHtml(s.name||"")}</span><span class="x" title="Remove">✕</span>`;
+    c.querySelector(".x").addEventListener("click", () => {
+      state.teams[team].roster = state.teams[team].roster.filter(x => x.id !== s.id);
+      save(); renderRoster(team);
+    });
+    wrap.appendChild(c);
+  });
+}
+
+function escapeHtml(str){ return String(str).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
+
+// team name / color inputs
+$("homeName").addEventListener("input", e => { state.teams.home.name = e.target.value; save(); refreshNames(); });
+$("awayName").addEventListener("input", e => { state.teams.away.name = e.target.value; save(); refreshNames(); });
+$("homeColor").addEventListener("input", e => { state.teams.home.color = e.target.value; applyTeamColors(); save(); });
+$("awayColor").addEventListener("input", e => { state.teams.away.color = e.target.value; applyTeamColors(); save(); });
+
+// add skaters
+document.querySelectorAll("[data-add]").forEach(btn => {
+  btn.addEventListener("click", () => addSkater(btn.dataset.add));
+});
+function addSkater(team) {
+  const numEl = $(team + "AddNum"), nameEl = $(team + "AddName");
+  const number = numEl.value.trim(), name = nameEl.value.trim();
+  if (!number && !name) { toast("Enter a number or name"); return; }
+  state.teams[team].roster.push({ id: uid(), number: number || "?", name });
+  numEl.value = ""; nameEl.value = ""; numEl.focus();
+  save(); renderRoster(team);
+}
+["home","away"].forEach(t => {
+  $(t+"AddName").addEventListener("keydown", e => { if (e.key === "Enter") addSkater(t); });
+  $(t+"AddNum").addEventListener("keydown", e => { if (e.key === "Enter") $(t+"AddName").focus(); });
+});
+
+// CSV roster import (columns: name, number — header optional, order auto-detected)
+function parseCsvLine(line) {
+  const out = []; let cur = "", inQ = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQ) {
+      if (ch === '"' && line[i+1] === '"') { cur += '"'; i++; }
+      else if (ch === '"') inQ = false;
+      else cur += ch;
+    } else {
+      if (ch === '"') inQ = true;
+      else if (ch === "," || ch === "\t" || ch === ";") { out.push(cur); cur = ""; }
+      else cur += ch;
+    }
+  }
+  out.push(cur);
+  return out.map(s => s.trim());
+}
+function importRosterCsv(team, text) {
+  const lines = text.split(/\r\n|\r|\n/).filter(l => l.trim() !== "");
+  if (!lines.length) { toast("CSV looks empty"); return; }
+
+  // detect and drop a header row (contains "name" or "number"/"num"/"#" words, no standalone digits)
+  let start = 0;
+  const first = lines[0].toLowerCase();
+  if (/\bname\b|\bnumber\b|\bnum\b|player|skater/.test(first) && !/\d{1,3}\s*(,|;|\t|$)/.test(lines[0])) start = 1;
+
+  // figure out which column is the number: prefer the column that is mostly numeric
+  const sample = lines.slice(start).map(parseCsvLine).filter(c => c.length);
+  const numericScore = (idx) => sample.reduce((n, c) => n + (/^\s*#?\d{1,3}\s*$/.test(c[idx] || "") ? 1 : 0), 0);
+  let numCol = 1, nameCol = 0;
+  if (sample.length) {
+    const s0 = numericScore(0), s1 = numericScore(1);
+    if (s0 > s1) { numCol = 0; nameCol = 1; }
+  }
+
+  let added = 0;
+  sample.forEach(cols => {
+    let number = (cols[numCol] || "").replace(/^#/, "").trim();
+    let name = (cols[nameCol] || "").trim();
+    if (!number && !name) return;
+    // single-column file: treat the lone value as a name
+    if (cols.length === 1) { name = cols[0]; number = ""; }
+    state.teams[team].roster.push({ id: uid(), number: number || "?", name });
+    added++;
+  });
+  save(); renderRoster(team); renderLive();
+  toast(added ? `Imported ${added} skater${added>1?"s":""} → ${teamName(team)}` : "No rows imported");
+}
+document.querySelectorAll(".csvRoster").forEach(input => {
+  input.addEventListener("change", (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => importRosterCsv(input.dataset.csv, String(reader.result));
+    reader.onerror = () => toast("Couldn't read that file");
+    reader.readAsText(file);
+    e.target.value = "";
+  });
+});
+
+function refreshNames() {
+  $("stripHomeName").textContent = teamName("home");
+  $("stripAwayName").textContent = teamName("away");
+  $("liveHomeName").textContent = teamName("home");
+  $("liveAwayName").textContent = teamName("away");
+  $("heatHomeTitle").textContent = teamName("home") + " jammers";
+  $("heatAwayTitle").textContent = teamName("away") + " jammers";
+  $("exitBtnHome").textContent = "Mark " + teamName("home") + " jammer";
+  $("exitBtnAway").textContent = "Mark " + teamName("away") + " jammer";
+}
+
+/* ----------------------------- Live rendering ----------------------------- */
+function renderLive() {
+  refreshNames();
+  updatePeriodButtons();
+  $("curJam").textContent = state.jamNumber;
+  refreshScores();
+
+  const noRoster = !state.teams.home.roster.length || !state.teams.away.roster.length;
+  $("setupWarn").style.display = noRoster ? "block" : "none";
+
+  const wrap = $("liveTeams");
+  wrap.innerHTML = "";
+  wrap.appendChild(teamPanel("home"));
+  wrap.appendChild(teamPanel("away"));
+
+  drawTrackBase($("liveTrack"));
+  drawLiveExits();
+  document.querySelectorAll("[data-exit]").forEach(b =>
+    b.classList.toggle("sel", b.dataset.exit === exitMode));
+
+  renderClockUI();
+  renderJamList();
+}
+
+/* ----------------------------- Jam clock + lead ----------------------------- */
+let clockInterval = null;
+function jamTimer() {
+  if (!state.current.timer) state.current.timer = { running:false, startedAt:null, accumMs:0 };
+  return state.current.timer;
+}
+function jamElapsedMs() {
+  const t = jamTimer();
+  return t.accumMs + (t.running && t.startedAt ? (Date.now() - t.startedAt) : 0);
+}
+function fmtClock(ms) {
+  const s = Math.floor(ms / 1000);
+  return `${Math.floor(s/60)}:${String(s%60).padStart(2,"0")}`;
+}
+function fmtLeadTime(sec) {
+  if (sec == null) return "—";
+  if (sec < 60) return sec.toFixed(1) + "s";
+  const m = Math.floor(sec/60);
+  return `${m}:${String(Math.round(sec%60)).padStart(2,"0")}`;
+}
+function renderClockUI() {
+  const t = jamTimer();
+  $("jamClock").textContent = fmtClock(jamElapsedMs());
+  $("clockToggle").textContent = t.running ? "Stop" : (t.accumMs > 0 ? "Resume" : "Start jam");
+  $("clockToggle").classList.toggle("gold", t.running);
+  $("clockToggle").classList.toggle("teal", !t.running);
+
+  const c = state.current;
+  $("leadHome").classList.toggle("sel", !!c.home.lead);
+  $("leadAway").classList.toggle("sel", !!c.away.lead);
+  document.querySelector("#leadHome .lb-name").textContent = teamName("home");
+  document.querySelector("#leadAway .lb-name").textContent = teamName("away");
+
+  const leadTeam = c.home.lead ? "home" : (c.away.lead ? "away" : null);
+  let msg;
+  if (leadTeam) msg = `Lead: ${teamName(leadTeam)}` + (c[leadTeam].leadTime != null ? ` in ${fmtLeadTime(c[leadTeam].leadTime)}` : " (no time captured)");
+  else msg = "No lead yet this jam.";
+  $("leadStatus").textContent = msg;
+
+  // manual time-to-lead field (don't clobber while the user is typing in it)
+  const lti = $("leadTimeInput");
+  if (document.activeElement !== lti) {
+    lti.value = leadTeam && c[leadTeam].leadTime != null ? c[leadTeam].leadTime : "";
+  }
+  lti.disabled = !leadTeam;
+  lti.placeholder = leadTeam ? "seconds" : "set lead first";
+
+  ensureClockTicking();
+}
+function ensureClockTicking() {
+  const running = jamTimer().running;
+  if (running && !clockInterval) {
+    clockInterval = setInterval(() => { $("jamClock").textContent = fmtClock(jamElapsedMs()); }, 100);
+  } else if (!running && clockInterval) {
+    clearInterval(clockInterval); clockInterval = null;
+  }
+}
+$("clockToggle").addEventListener("click", () => {
+  const t = jamTimer();
+  if (t.running) { t.accumMs = jamElapsedMs(); t.running = false; t.startedAt = null; }
+  else { t.running = true; t.startedAt = Date.now(); }
+  save(); renderClockUI();
+});
+$("clockReset").addEventListener("click", () => {
+  state.current.timer = { running:false, startedAt:null, accumMs:0 };
+  save(); renderClockUI(); toast("Clock reset");
+});
+document.querySelectorAll("[data-lead]").forEach(b => {
+  b.addEventListener("click", () => {
+    const which = b.dataset.lead;
+    const c = state.current;
+    if (which === "none") {
+      c.home.lead = c.away.lead = false;
+      c.home.leadTime = c.away.leadTime = null;
+    } else {
+      const other = which === "home" ? "away" : "home";
+      if (c[which].lead) {            // toggle off
+        c[which].lead = false; c[which].leadTime = null;
+      } else {                        // set lead for this team, clear the other
+        c[which].lead = true; c[other].lead = false; c[other].leadTime = null;
+        const t = jamTimer();
+        const usedTimer = t.running || t.accumMs > 0;
+        c[which].leadTime = usedTimer ? +(jamElapsedMs() / 1000).toFixed(1) : null;
+      }
+    }
+    save(); renderClockUI();
+    if (which !== "none" && c[which].lead) toast(teamName(which) + " lead" + (c[which].leadTime != null ? " · " + fmtLeadTime(c[which].leadTime) : ""));
+  });
+});
+// manual time-to-lead override
+$("leadTimeInput").addEventListener("input", () => {
+  const c = state.current;
+  const leadTeam = c.home.lead ? "home" : (c.away.lead ? "away" : null);
+  if (!leadTeam) return;
+  const raw = $("leadTimeInput").value.trim();
+  if (raw === "") { c[leadTeam].leadTime = null; }
+  else { const v = parseFloat(raw); c[leadTeam].leadTime = isNaN(v) ? null : Math.max(0, +v.toFixed(1)); }
+  save();
+  $("leadStatus").textContent = `Lead: ${teamName(leadTeam)}` + (c[leadTeam].leadTime != null ? ` in ${fmtLeadTime(c[leadTeam].leadTime)}` : " (no time captured)");
+});
+// Clear game (top of Live) — wipe score + jams, keep rosters, no export
+$("clearGameTop").addEventListener("click", () => {
+  if (!confirm("Clear the whole game — score and all jams? Skater rosters are kept. This does NOT export.")) return;
+  clearGameKeepRosters();
+  renderLive();
+  toast("Game cleared");
+});
+
+function refreshScores() {
+  const h = totalScore("home"), a = totalScore("away");
+  $("stripHomeScore").textContent = h;
+  $("stripAwayScore").textContent = a;
+  $("liveHomeScore").textContent = h;
+  $("liveAwayScore").textContent = a;
+}
+
+function teamPanel(team) {
+  const cur = state.current[team];
+  const roster = state.teams[team].roster.slice().sort((a,b)=>(parseInt(a.number)||0)-(parseInt(b.number)||0));
+  const card = document.createElement("div");
+  card.className = "card team-" + team;
+
+  const head = document.createElement("div");
+  head.className = "team-head";
+  head.innerHTML = `<span class="team-dot"></span><span class="team-name">${escapeHtml(teamName(team))}</span>`;
+  card.appendChild(head);
+
+  if (!roster.length) {
+    const p = document.createElement("p");
+    p.className = "empty";
+    p.textContent = "Add skaters on Setup to build this lineup.";
+    card.appendChild(p);
+    return card;
+  }
+
+  // JAMMER group
+  card.appendChild(pickGroup(team, "jammer", "Jammer (pick 1)", roster, cur));
+  // BLOCKERS group
+  card.appendChild(pickGroup(team, "blocker", "Blockers (pick up to 4 · tap ★ for pivot)", roster, cur));
+
+  // POINTS — free text entry; type the team's total points for the jam
+  const pts = document.createElement("div");
+  pts.className = "pickgroup";
+  pts.innerHTML = `<div class="pl">Points this jam (type total)</div>`;
+  const ptsInput = document.createElement("input");
+  ptsInput.type = "number";
+  ptsInput.inputMode = "numeric";
+  ptsInput.min = "0";
+  ptsInput.className = "pts-input";
+  ptsInput.value = cur.points || 0;
+  ptsInput.addEventListener("input", () => {
+    const v = parseInt(ptsInput.value, 10);
+    cur.points = isNaN(v) ? 0 : Math.max(0, v);
+    save(); refreshScores();
+  });
+  pts.appendChild(ptsInput);
+
+  // star pass toggle (pass the panty to the pivot)
+  const sp = document.createElement("label");
+  sp.className = "lead-toggle";
+  sp.innerHTML = `<input type="checkbox" ${cur.starPass ? "checked":""}/> ⭐ Star pass (panty → pivot)`;
+  sp.querySelector("input").addEventListener("change", e => { cur.starPass = e.target.checked; save(); });
+  pts.appendChild(sp);
+  card.appendChild(pts);
+
+  return card;
+}
+
+function pickGroup(team, role, label, roster, cur) {
+  const g = document.createElement("div");
+  g.className = "pickgroup";
+  const selectedCount = role === "jammer" ? (cur.jammer ? 1 : 0) : cur.blockers.length;
+  const cntTxt = role === "jammer" ? (cur.jammer ? "✓" : "0") : `${cur.blockers.length}/4`;
+  g.innerHTML = `<div class="pl">${label} <span class="cnt">${cntTxt}</span></div>`;
+  const picks = document.createElement("div");
+  picks.className = "picks";
+
+  roster.forEach(s => {
+    const pk = document.createElement("div");
+    const isJammer = cur.jammer === s.id;
+    const isBlocker = cur.blockers.includes(s.id);
+    const on = role === "jammer" ? isJammer : isBlocker;
+    pk.className = "pk" + (role === "jammer" ? " jam" : "") + (on ? " on" : "") + (role==="blocker" && cur.pivot===s.id ? " pivot":"");
+    const penCount = cur.penalties[s.id] || 0;
+    pk.innerHTML =
+      `<div class="n">${escapeHtml(s.number)}</div>` +
+      (s.name ? `<div class="nm2">${escapeHtml(s.name)}</div>` : "") +
+      (penCount ? `<span class="pen-badge">P${penCount>1?"×"+penCount:""}</span>` : "");
+
+    if (role === "jammer") {
+      pk.addEventListener("click", () => {
+        cur.jammer = (cur.jammer === s.id) ? null : s.id;
+        // jammer can't also be a blocker
+        cur.blockers = cur.blockers.filter(b => b !== cur.jammer);
+        if (cur.pivot === cur.jammer) cur.pivot = null;
+        save(); renderLiveTeamsOnly();
+      });
+    } else {
+      // blocker chip
+      if (on) {
+        const piv = document.createElement("span");
+        piv.className = "pivot-toggle";
+        piv.textContent = cur.pivot === s.id ? "PIVOT" : "★";
+        piv.title = "Toggle pivot";
+        piv.addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          cur.pivot = (cur.pivot === s.id) ? null : s.id;
+          save(); renderLiveTeamsOnly();
+        });
+        pk.appendChild(piv);
+      }
+      pk.addEventListener("click", () => {
+        if (cur.blockers.includes(s.id)) {
+          cur.blockers = cur.blockers.filter(b => b !== s.id);
+          if (cur.pivot === s.id) cur.pivot = null;
+        } else {
+          if (cur.jammer === s.id) cur.jammer = null; // can't be both
+          if (cur.blockers.length >= 4) { toast("Max 4 blockers"); return; }
+          cur.blockers.push(s.id);
+        }
+        save(); renderLiveTeamsOnly();
+      });
+      // long-press / right-click to add penalty quickly on any on-track skater
+    }
+
+    // penalty control: available for anyone currently on track (jammer or blocker)
+    const onTrack = (cur.jammer === s.id) || cur.blockers.includes(s.id);
+    if (onTrack) {
+      const penBtn = document.createElement("span");
+      penBtn.className = "pivot-toggle";
+      penBtn.style.bottom = "auto";
+      penBtn.style.top = "-8px";
+      penBtn.style.left = "auto";
+      penBtn.style.right = "-6px";
+      penBtn.style.transform = "none";
+      penBtn.style.background = "var(--red)";
+      penBtn.style.color = "#fff";
+      penBtn.style.borderColor = "var(--red)";
+      penBtn.textContent = "+P";
+      penBtn.title = "Tap: add penalty · Long-press / right-click: remove";
+      let pt, longPressed = false;
+      penBtn.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        if (longPressed) { longPressed = false; return; } // long-press already handled removal
+        cur.penalties[s.id] = (cur.penalties[s.id] || 0) + 1;
+        save(); renderLiveTeamsOnly();
+        toast("Penalty · #" + s.number);
+      });
+      penBtn.addEventListener("contextmenu", (ev) => {
+        ev.preventDefault(); ev.stopPropagation();
+        removePenalty(cur, s);
+      });
+      penBtn.addEventListener("pointerdown", () => {
+        longPressed = false;
+        pt = setTimeout(() => { longPressed = true; removePenalty(cur, s); }, 550);
+      });
+      ["pointerup","pointerleave","pointercancel"].forEach(evn => penBtn.addEventListener(evn, () => clearTimeout(pt)));
+      // only show +P on the blocker group to avoid duplicate; but jammer group also shows.
+      if (role === "jammer" && cur.jammer === s.id) pk.appendChild(penBtn);
+      if (role === "blocker" && cur.blockers.includes(s.id)) pk.appendChild(penBtn);
+    }
+
+    picks.appendChild(pk);
+  });
+  g.appendChild(picks);
+  return g;
+}
+
+function removePenalty(cur, s) {
+  if (cur.penalties[s.id]) {
+    cur.penalties[s.id]--;
+    if (!cur.penalties[s.id]) delete cur.penalties[s.id];
+    save(); renderLiveTeamsOnly();
+    toast("Removed penalty · #" + s.number);
+  }
+}
+
+function renderLiveTeamsOnly() {
+  const wrap = $("liveTeams");
+  wrap.innerHTML = "";
+  wrap.appendChild(teamPanel("home"));
+  wrap.appendChild(teamPanel("away"));
+  refreshScores();
+}
+
+/* period + jam controls */
+function jamsInPeriod(p) { return state.jams.filter(j => j.period === p).length; }
+function updatePeriodButtons() {
+  document.querySelectorAll("[data-period]").forEach(b => b.classList.toggle("on", +b.dataset.period === state.period));
+}
+function setPeriod(p) {
+  state.period = p;
+  state.jamNumber = jamsInPeriod(p) + 1; // continue numbering within the chosen period
+  save();
+  updatePeriodButtons();
+  $("curJam").textContent = state.jamNumber;
+  toast("Period " + p);
+}
+document.querySelectorAll("[data-period]").forEach(b =>
+  b.addEventListener("click", () => setPeriod(+b.dataset.period)));
+
+$("finishJam").addEventListener("click", () => {
+  const c = state.current;
+  const hasLineup = c.home.jammer || c.away.jammer || c.home.blockers.length || c.away.blockers.length || c.home.points || c.away.points;
+  if (!hasLineup) { toast("Nothing to record yet"); return; }
+  const record = JSON.parse(JSON.stringify(c));
+  record.period = state.period;
+  record.jamNumber = state.jamNumber;
+  record.id = uid();
+  const t = c.timer;
+  record.durationSec = (t && (t.running || t.accumMs > 0)) ? +(jamElapsedMs() / 1000).toFixed(1) : null;
+  state.jams.push(record);
+  state.jamNumber = jamsInPeriod(state.period) + 1;
+  state.current = freshJam(record); // carry lineups
+  save();
+  renderLive();
+  toast("Jam saved → Jam " + state.jamNumber);
+});
+
+$("clearJam").addEventListener("click", () => {
+  state.current = freshJam();
+  save(); renderLive(); toast("Jam cleared");
+});
+
+/* ----------------------------- Track drawing ----------------------------- */
+/* A simplified derby track: outer + inner boundary forming a skating lane. */
+function trackGeometry() {
+  // viewBox 400x240. Rounded rectangle track.
+  return {
+    outer: { x: 24, y: 24, w: 352, h: 192, r: 96 },
+    inner: { x: 96, y: 84, w: 208, h: 72, r: 36 }
+  };
+}
+function roundRectPath(o) {
+  const {x,y,w,h,r} = o;
+  const rr = Math.min(r, h/2, w/2);
+  return `M ${x+rr} ${y} H ${x+w-rr} A ${rr} ${rr} 0 0 1 ${x+w-rr} ${y+h} ` +
+         `H ${x+rr} A ${rr} ${rr} 0 0 1 ${x+rr} ${y} Z`;
+}
+function arrowPath(x, y, dir) {
+  const s = 7;
+  switch (dir) {
+    case "left":  return `M ${x+s} ${y-s} L ${x-s} ${y} L ${x+s} ${y+s} Z`;
+    case "right": return `M ${x-s} ${y-s} L ${x+s} ${y} L ${x-s} ${y+s} Z`;
+    case "up":    return `M ${x-s} ${y+s} L ${x} ${y-s} L ${x+s} ${y+s} Z`;
+    case "down":  return `M ${x-s} ${y-s} L ${x} ${y+s} L ${x+s} ${y-s} Z`;
+  }
+  return "";
+}
+
+function drawTrackBase(svg) {
+  const g = trackGeometry();
+  const NS = "http://www.w3.org/2000/svg";
+  svg.innerHTML = "";
+
+  // defs for heat gradient
+  const defs = document.createElementNS(NS, "defs");
+  defs.innerHTML =
+    `<radialGradient id="heatDot" cx="50%" cy="50%" r="50%">
+       <stop offset="0%" stop-color="#c85a2a" stop-opacity="0.9"/>
+       <stop offset="40%" stop-color="#d0761d" stop-opacity="0.55"/>
+       <stop offset="75%" stop-color="#1f8a52" stop-opacity="0.3"/>
+       <stop offset="100%" stop-color="#1f8a52" stop-opacity="0"/>
+     </radialGradient>`;
+  svg.appendChild(defs);
+
+  // track lane (outer fill minus inner)
+  const lane = document.createElementNS(NS, "path");
+  lane.setAttribute("d", roundRectPath(g.outer) + " " + roundRectPath(g.inner));
+  lane.setAttribute("fill-rule", "evenodd");
+  lane.setAttribute("fill", "#e2e6e8");
+  lane.setAttribute("stroke", "#c2c9cc");
+  lane.setAttribute("stroke-width", "1.5");
+  svg.appendChild(lane);
+
+  // pivot line / jammer line markers (approx) on the lower straightaway
+  const outerB = document.createElementNS(NS, "path");
+  outerB.setAttribute("d", roundRectPath(g.outer));
+  outerB.setAttribute("fill", "none");
+  outerB.setAttribute("stroke", "rgba(0,0,0,0.10)");
+  outerB.setAttribute("stroke-width", "1");
+  svg.appendChild(outerB);
+
+  // zone labels — turns numbered in the counter-clockwise direction of travel
+  const labels = [
+    {t:"Turn 3", x: 60, y: 60}, {t:"Turn 2", x: 340, y: 60},
+    {t:"Turn 4", x: 60, y: 186}, {t:"Turn 1", x: 340, y: 186},
+    {t:"Back straightaway", x: 200, y: 44}, {t:"Home straightaway", x: 200, y: 202},
+  ];
+  labels.forEach(l => {
+    const tx = document.createElementNS(NS, "text");
+    tx.setAttribute("x", l.x); tx.setAttribute("y", l.y);
+    tx.setAttribute("fill", "rgba(70,80,76,0.7)");
+    tx.setAttribute("font-size", "9");
+    tx.setAttribute("text-anchor", "middle");
+    tx.textContent = l.t;
+    svg.appendChild(tx);
+  });
+
+  // home straightaway reference marks: jammer line (behind) + pivot line (front)
+  const lineY1 = g.inner.y + g.inner.h; // inner boundary (156)
+  const lineY2 = g.outer.y + g.outer.h; // outer boundary (216)
+  const straightLines = [
+    { x: 158, label: "Jammer line", color: "rgba(208,118,29,0.95)" },
+    { x: 242, label: "Pivot line",  color: "rgba(40,48,44,0.85)" },
+  ];
+  straightLines.forEach(sl => {
+    const ln = document.createElementNS(NS, "line");
+    ln.setAttribute("x1", sl.x); ln.setAttribute("y1", lineY1);
+    ln.setAttribute("x2", sl.x); ln.setAttribute("y2", lineY2);
+    ln.setAttribute("stroke", sl.color);
+    ln.setAttribute("stroke-width", "2.5");
+    svg.appendChild(ln);
+    const lb = document.createElementNS(NS, "text");
+    lb.setAttribute("x", sl.x); lb.setAttribute("y", lineY1 - 5);
+    lb.setAttribute("fill", sl.color);
+    lb.setAttribute("font-size", "8");
+    lb.setAttribute("font-weight", "700");
+    lb.setAttribute("text-anchor", "middle");
+    lb.textContent = sl.label;
+    svg.appendChild(lb);
+  });
+
+  // group for markers/heat added later
+  const layer = document.createElementNS(NS, "g");
+  layer.setAttribute("id", svg.id + "-layer");
+  svg.appendChild(layer);
+}
+
+function svgPointFromEvent(svg, evt) {
+  const rect = svg.getBoundingClientRect();
+  const vb = svg.viewBox.baseVal;
+  const px = (evt.clientX - rect.left) / rect.width * vb.width;
+  const py = (evt.clientY - rect.top) / rect.height * vb.height;
+  return { x: +px.toFixed(1), y: +py.toFixed(1) };
+}
+
+// live track: click to set exit for current exitMode team
+$("liveTrack").addEventListener("click", (e) => {
+  const p = svgPointFromEvent($("liveTrack"), e);
+  state.current[exitMode].exit = p;
+  save(); drawLiveExits();
+  toast(teamName(exitMode) + " jammer exit marked");
+});
+document.querySelectorAll("[data-exit]").forEach(b => {
+  b.addEventListener("click", () => {
+    exitMode = b.dataset.exit;
+    document.querySelectorAll("[data-exit]").forEach(x => x.classList.toggle("sel", x.dataset.exit === exitMode));
+  });
+});
+
+function drawLiveExits() {
+  const svg = $("liveTrack");
+  const layer = $(svg.id + "-layer");
+  if (!layer) return;
+  layer.innerHTML = "";
+  const NS = "http://www.w3.org/2000/svg";
+  [["home", state.teams.home.color], ["away", state.teams.away.color]].forEach(([t, color]) => {
+    const ex = state.current[t].exit;
+    if (!ex) return;
+    const c = document.createElementNS(NS, "circle");
+    c.setAttribute("cx", ex.x); c.setAttribute("cy", ex.y); c.setAttribute("r", "8");
+    c.setAttribute("fill", color); c.setAttribute("stroke", "#fff"); c.setAttribute("stroke-width", "2");
+    c.setAttribute("opacity", "0.95");
+    layer.appendChild(c);
+  });
+}
+
+/* ----------------------------- Jam list (live) ----------------------------- */
+function renderJamList() {
+  const wrap = $("jamList");
+  $("jamCountTag").textContent = state.jams.length;
+  if (!state.jams.length) { wrap.innerHTML = '<p class="empty">No jams recorded yet.</p>'; return; }
+  wrap.innerHTML = "";
+  state.jams.slice().reverse().forEach(j => {
+    const row = document.createElement("div");
+    row.className = "jl";
+    const hj = j.home.jammer ? "#"+skaterLabel("home", j.home.jammer) : "—";
+    const aj = j.away.jammer ? "#"+skaterLabel("away", j.away.jammer) : "—";
+    const leadWho = j.home.lead ? "home" : (j.away.lead ? "away" : null);
+    let meta = "";
+    if (leadWho) meta += `<span class="lead-mark">★ ${escapeHtml(teamName(leadWho))}</span>` + (j[leadWho].leadTime != null ? ` ${fmtLeadTime(j[leadWho].leadTime)}` : "");
+    if (j.home.starPass || j.away.starPass) meta += (meta ? " · " : "") + "⭐SP";
+    row.innerHTML =
+      `<span class="j-no">P${j.period}·J${j.jamNumber}</span>` +
+      `<span>J:${hj} <span class="j-sc" style="color:var(--home)">${j.home.points}</span> – ` +
+      `<span class="j-sc" style="color:var(--away)">${j.away.points}</span> J:${aj}` +
+      (meta ? `<span class="jl-meta">${meta}</span>` : "") + `</span>`;
+    const undo = document.createElement("button");
+    undo.className = "btn ghost sm undo";
+    undo.textContent = "Delete";
+    undo.addEventListener("click", () => {
+      state.jams = state.jams.filter(x => x.id !== j.id);
+      save(); renderLive(); refreshScores(); toast("Jam removed");
+    });
+    row.appendChild(undo);
+    wrap.appendChild(row);
+  });
+}
+
+/* ----------------------------- Insights ----------------------------- */
+let penTeam = "home", jamTeam = "home";
+document.querySelectorAll("#penSeg button").forEach(b => b.addEventListener("click", () => {
+  penTeam = b.dataset.penteam;
+  document.querySelectorAll("#penSeg button").forEach(x => x.classList.toggle("on", x === b));
+  renderPenalties();
+}));
+document.querySelectorAll("#jamSeg button").forEach(b => b.addEventListener("click", () => {
+  jamTeam = b.dataset.jamteam;
+  document.querySelectorAll("#jamSeg button").forEach(x => x.classList.toggle("on", x === b));
+  renderJammerTable();
+}));
+
+function renderInsights() {
+  refreshNames();
+  renderStatGrid();
+  renderPenalties();
+  renderHeat($("heatHome"), "home");
+  renderHeat($("heatAway"), "away");
+  renderJammerTable();
+  renderLeadTiming();
+  renderStarPass();
+  renderBlockerTable();
+  renderPairTable();
+  renderPackTable();
+  renderPackVsTable();
+  renderJammerVsTable();
+  renderTheirPacksVsJammers();
+}
+
+function renderStatGrid() {
+  const h = totalScore("home"), a = totalScore("away");
+  const jams = state.jams.length;
+  const homePen = countPenalties("home"), awayPen = countPenalties("away");
+  const lead = state.jams.filter(j => j.home.lead).length;
+  const grid = $("statGrid");
+  grid.innerHTML = "";
+  const boxes = [
+    { l: teamName("home"), v: h, c: "var(--home)" },
+    { l: teamName("away"), v: a, c: "var(--away)" },
+    { l: "Margin", v: (h-a>0?"+":"") + (h-a), c: h-a>=0?"var(--good)":"var(--bad)" },
+    { l: "Jams", v: jams, c: "var(--ink)" },
+    { l: teamName("home")+" penalties", v: homePen, c: "var(--red)" },
+    { l: teamName("away")+" penalties", v: awayPen, c: "var(--red)" },
+    { l: "Your lead jams", v: lead, c: "var(--gold)" },
+  ];
+  boxes.forEach(b => {
+    const d = document.createElement("div");
+    d.className = "stat-box";
+    d.innerHTML = `<div class="v" style="color:${b.c}">${b.v}</div><div class="l">${escapeHtml(b.l)}</div>`;
+    grid.appendChild(d);
+  });
+}
+
+function countPenalties(team) {
+  let n = 0;
+  for (const j of state.jams) for (const k in j[team].penalties) n += j[team].penalties[k];
+  return n;
+}
+
+function renderPenalties() {
+  const wrap = $("penBars");
+  const tally = {}; // skaterId -> count
+  for (const j of state.jams) {
+    const pens = j[penTeam].penalties || {};
+    for (const k in pens) tally[k] = (tally[k] || 0) + pens[k];
+  }
+  const entries = Object.entries(tally).sort((a,b)=>b[1]-a[1]);
+  if (!entries.length) { wrap.innerHTML = '<p class="empty">No penalties logged for this team.</p>'; return; }
+  const max = entries[0][1];
+  wrap.innerHTML = "";
+  entries.forEach(([id, count]) => {
+    const s = skater(penTeam, id);
+    const label = s ? `#${s.number} ${s.name||""}` : "Unknown";
+    const row = document.createElement("div");
+    row.className = "barrow";
+    row.innerHTML =
+      `<div class="lbl">${escapeHtml(label)}</div>` +
+      `<div class="bartrack"><div class="barfill" style="width:${(count/max*100)}%"></div></div>` +
+      `<div class="val">${count}</div>`;
+    wrap.appendChild(row);
+  });
+}
+
+/* Heat map: aggregate exits across finished jams (+ current) */
+function renderHeat(svg, team) {
+  drawTrackBase(svg);
+  const layer = $(svg.id + "-layer");
+  const NS = "http://www.w3.org/2000/svg";
+  const points = [];
+  for (const j of state.jams) if (j[team].exit) points.push(j[team].exit);
+  if (state.current[team].exit) points.push(state.current[team].exit);
+  if (!points.length) {
+    const tx = document.createElementNS(NS, "text");
+    tx.setAttribute("x", 200); tx.setAttribute("y", 122);
+    tx.setAttribute("fill", "rgba(70,80,76,0.8)");
+    tx.setAttribute("font-size", "11"); tx.setAttribute("text-anchor", "middle");
+    tx.textContent = "No jammer exits marked yet";
+    layer.appendChild(tx);
+    return;
+  }
+  points.forEach(p => {
+    const c = document.createElementNS(NS, "circle");
+    c.setAttribute("cx", p.x); c.setAttribute("cy", p.y);
+    c.setAttribute("r", "26");
+    c.setAttribute("fill", "url(#heatDot)");
+    layer.appendChild(c);
+  });
+  // count marker
+  const tx = document.createElementNS(NS, "text");
+  tx.setAttribute("x", 200); tx.setAttribute("y", 232);
+  tx.setAttribute("fill", "rgba(70,80,76,0.85)");
+  tx.setAttribute("font-size", "9"); tx.setAttribute("text-anchor", "middle");
+  tx.textContent = points.length + " exit" + (points.length>1?"s":"") + " logged";
+  layer.appendChild(tx);
+}
+
+/* differential for a team in a jam */
+function jamDiff(j, team) {
+  const opp = team === "home" ? "away" : "home";
+  return (j[team].points||0) - (j[opp].points||0);
+}
+
+function diffCell(v) {
+  const cls = v > 0 ? "diff-pos" : (v < 0 ? "diff-neg" : "");
+  const txt = (v>0?"+":"") + v;
+  return `<span class="${cls}">${txt}</span>`;
+}
+
+/* Jammer effectiveness */
+function renderJammerTable() {
+  const team = jamTeam;
+  const stats = {}; // jammerId -> aggregates
+  for (const j of state.jams) {
+    const jm = j[team].jammer;
+    if (!jm) continue;
+    const s = stats[jm] || (stats[jm] = { jams:0, pts:0, lead:0, ttlSum:0, ttlN:0, sp:0, diff:0 });
+    s.jams++;
+    s.pts += j[team].points||0;
+    if (j[team].lead) { s.lead++; if (j[team].leadTime != null) { s.ttlSum += j[team].leadTime; s.ttlN++; } }
+    if (j[team].starPass) s.sp++;
+    s.diff += jamDiff(j, team);
+  }
+  const rows = Object.entries(stats).map(([id, s]) => ({
+    id, ...s, ppj: s.pts/s.jams, leadPct: s.lead/s.jams*100, avgTtl: s.ttlN ? s.ttlSum/s.ttlN : null, avgDiff: s.diff/s.jams
+  })).sort((a,b)=> b.ppj - a.ppj);
+  const wrap = $("jammerTable");
+  if (!rows.length) { wrap.innerHTML = '<p class="empty">No jammer data yet.</p>'; return; }
+  let html = `<div class="tbl-scroll"><table><thead><tr><th>Jammer</th><th class="num">Jams</th><th class="num">P/J</th><th class="num">Lead%</th><th class="num">Avg TTL</th><th class="num">Star pass</th><th class="num">Net/Jam</th></tr></thead><tbody>`;
+  rows.forEach(r => {
+    const s = skater(team, r.id);
+    const label = s ? `#${escapeHtml(s.number)} ${escapeHtml(s.name||"")}` : "?";
+    html += `<tr><td>${label}</td><td class="num">${r.jams}</td>` +
+            `<td class="num">${r.ppj.toFixed(1)}</td><td class="num">${r.leadPct.toFixed(0)}%</td>` +
+            `<td class="num">${fmtLeadTime(r.avgTtl)}</td><td class="num">${r.sp}</td>` +
+            `<td class="num">${diffCell(+r.avgDiff.toFixed(1))}</td></tr>`;
+  });
+  html += `</tbody></table></div>`;
+  wrap.innerHTML = html;
+}
+
+/* Lead battle & timing (team level + your-team impact) */
+function renderLeadTiming() {
+  const jams = state.jams;
+  const avg = arr => arr.length ? arr.reduce((a,b)=>a+b,0)/arr.length : null;
+  const homeLead = jams.filter(j => j.home.lead);
+  const awayLead = jams.filter(j => j.away.lead);
+  const noLead = jams.filter(j => !j.home.lead && !j.away.lead);
+  const hTtl = avg(homeLead.filter(j => j.home.leadTime != null).map(j => j.home.leadTime));
+  const aTtl = avg(awayLead.filter(j => j.away.leadTime != null).map(j => j.away.leadTime));
+
+  const grid = $("leadStatGrid");
+  const boxes = [
+    { l: teamName("home") + " lead jams", v: homeLead.length, c: "var(--home)" },
+    { l: teamName("away") + " lead jams", v: awayLead.length, c: "var(--away)" },
+    { l: "No-lead jams", v: noLead.length, c: "var(--muted)" },
+    { l: teamName("home") + " avg time-to-lead", v: fmtLeadTime(hTtl), c: "var(--gold)" },
+    { l: teamName("away") + " avg time-to-lead", v: fmtLeadTime(aTtl), c: "var(--gold)" },
+  ];
+  grid.innerHTML = boxes.map(b => `<div class="stat-box"><div class="v" style="color:${b.c}">${b.v}</div><div class="l">${escapeHtml(b.l)}</div></div>`).join("");
+
+  const leadDiffs = homeLead.map(j => jamDiff(j, "home"));
+  const noLeadDiffs = jams.filter(j => !j.home.lead).map(j => jamDiff(j, "home"));
+  const winPct = arr => arr.length ? arr.filter(d => d > 0).length/arr.length*100 : null;
+  const rows = [
+    { k: "When " + teamName("home") + " has lead", jams: homeLead.length, win: winPct(leadDiffs), margin: avg(leadDiffs) },
+    { k: "When not lead", jams: noLeadDiffs.length, win: winPct(noLeadDiffs), margin: avg(noLeadDiffs) },
+  ];
+  let html = `<table><thead><tr><th>Situation</th><th class="num">Jams</th><th class="num">Jam win%</th><th class="num">Avg margin</th></tr></thead><tbody>`;
+  rows.forEach(r => {
+    html += `<tr><td>${escapeHtml(r.k)}</td><td class="num">${r.jams}</td>` +
+            `<td class="num">${r.win == null ? "—" : r.win.toFixed(0)+"%"}</td>` +
+            `<td class="num">${r.margin == null ? "—" : diffCell(+r.margin.toFixed(1))}</td></tr>`;
+  });
+  html += `</tbody></table>`;
+  $("leadImpactTable").innerHTML = html;
+}
+
+/* Star pass impact (your team) */
+function renderStarPass() {
+  const jams = state.jams;
+  const avg = arr => arr.length ? arr.reduce((a,b)=>a+b,0)/arr.length : null;
+  const sp = jams.filter(j => j.home.starPass);
+  const nonSp = jams.filter(j => !j.home.starPass);
+  const spPts = avg(sp.map(j => j.home.points||0));
+  const nonPts = avg(nonSp.map(j => j.home.points||0));
+  const spDiff = avg(sp.map(j => jamDiff(j, "home")));
+
+  const grid = $("spStatGrid");
+  const boxes = [
+    { l: "Star-pass jams", v: sp.length, c: "var(--purple)" },
+    { l: "Avg pts WITH star pass", v: spPts == null ? "—" : spPts.toFixed(1), c: "var(--home)" },
+    { l: "Avg pts WITHOUT", v: nonPts == null ? "—" : nonPts.toFixed(1), c: "var(--home)" },
+    { l: "Net/jam WITH star pass", v: spDiff == null ? "—" : (spDiff>0?"+":"")+spDiff.toFixed(1), c: (spDiff||0) >= 0 ? "var(--good)" : "var(--bad)" },
+  ];
+  grid.innerHTML = boxes.map(b => `<div class="stat-box"><div class="v" style="color:${b.c}">${b.v}</div><div class="l">${escapeHtml(b.l)}</div></div>`).join("");
+
+  const byPiv = {};
+  sp.forEach(j => {
+    const pid = j.home.pivot; if (!pid) return;
+    const o = byPiv[pid] || (byPiv[pid] = { jams:0, pts:0, diff:0 });
+    o.jams++; o.pts += j.home.points||0; o.diff += jamDiff(j, "home");
+  });
+  const rows = Object.entries(byPiv).map(([id,o]) => ({ id, ...o, ppj:o.pts/o.jams, avg:o.diff/o.jams }))
+    .sort((a,b)=> b.ppj - a.ppj);
+  const wrap = $("spPivotTable");
+  if (!rows.length) { wrap.innerHTML = '<p class="empty">No star passes with a marked pivot yet. (Mark the pivot ★ on the Live tab.)</p>'; return; }
+  let html = `<table><thead><tr><th>Pivot (receiver)</th><th class="num">SP jams</th><th class="num">Pts</th><th class="num">P/J</th><th class="num">Net/Jam</th></tr></thead><tbody>`;
+  rows.forEach(r => {
+    const s = skater("home", r.id);
+    const label = s ? `#${escapeHtml(s.number)} ${escapeHtml(s.name||"")}` : "?";
+    html += `<tr><td>${label}</td><td class="num">${r.jams}</td><td class="num">${r.pts}</td>` +
+            `<td class="num">${r.ppj.toFixed(1)}</td><td class="num">${diffCell(+r.avg.toFixed(1))}</td></tr>`;
+  });
+  html += `</tbody></table>`;
+  wrap.innerHTML = html;
+}
+
+/* Blocker effectiveness (home focus, but works for either — we show home) */
+function renderBlockerTable() {
+  const team = "home";
+  const stats = {};
+  for (const j of state.jams) {
+    const d = jamDiff(j, team);
+    j[team].blockers.forEach(bid => {
+      stats[bid] = stats[bid] || { jams:0, diff:0, pen:0 };
+      stats[bid].jams++;
+      stats[bid].diff += d;
+    });
+    for (const k in j[team].penalties) {
+      if (stats[k]) stats[k].pen += j[team].penalties[k];
+    }
+  }
+  const rows = Object.entries(stats).map(([id,s]) => ({ id, ...s, avg: s.diff/s.jams }))
+    .sort((a,b)=> b.avg - a.avg);
+  const wrap = $("blockerTable");
+  if (!rows.length) { wrap.innerHTML = '<p class="empty">No blocker data yet.</p>'; return; }
+  let html = `<table><thead><tr><th>Blocker</th><th class="num">Jams</th><th class="num">Net±</th><th class="num">Net/Jam</th><th class="num">Pen</th></tr></thead><tbody>`;
+  rows.forEach(r => {
+    const s = skater(team, r.id);
+    const label = s ? `#${escapeHtml(s.number)} ${escapeHtml(s.name||"")}` : "?";
+    html += `<tr><td>${label}</td><td class="num">${r.jams}</td><td class="num">${diffCell(r.diff)}</td>` +
+            `<td class="num">${diffCell(+r.avg.toFixed(1))}</td><td class="num">${r.pen||0}</td></tr>`;
+  });
+  html += `</tbody></table>`;
+  wrap.innerHTML = html;
+}
+
+/* Blocker pairings (home) */
+function renderPairTable() {
+  const team = "home";
+  const pairs = {}; // key "a|b" -> {jams, diff}
+  for (const j of state.jams) {
+    const bs = [...j[team].blockers].sort();
+    const d = jamDiff(j, team);
+    for (let i=0;i<bs.length;i++) for (let k=i+1;k<bs.length;k++) {
+      const key = bs[i] + "|" + bs[k];
+      pairs[key] = pairs[key] || { jams:0, diff:0 };
+      pairs[key].jams++; pairs[key].diff += d;
+    }
+  }
+  const rows = Object.entries(pairs).map(([key,s]) => {
+    const [a,b] = key.split("|");
+    return { a, b, jams:s.jams, diff:s.diff, avg:s.diff/s.jams };
+  }).sort((x,y)=> y.avg - x.avg || y.jams - x.jams);
+  const wrap = $("pairTable");
+  if (!rows.length) { wrap.innerHTML = '<p class="empty">Need jams with 2+ blockers logged.</p>'; return; }
+  let html = `<table><thead><tr><th>Pairing</th><th class="num">Jams</th><th class="num">Net±</th><th class="num">Net/Jam</th></tr></thead><tbody>`;
+  rows.slice(0, 15).forEach(r => {
+    html += `<tr><td>${pairLabel(team, r.a, r.b)}</td><td class="num">${r.jams}</td>` +
+            `<td class="num">${diffCell(r.diff)}</td><td class="num">${diffCell(+r.avg.toFixed(1))}</td></tr>`;
+  });
+  html += `</tbody></table>`;
+  wrap.innerHTML = html;
+}
+function pairLabel(team, a, b) {
+  const sa = skater(team, a), sb = skater(team, b);
+  const la = sa ? "#"+sa.number : "?", lb = sb ? "#"+sb.number : "?";
+  return `${la} + ${lb}`;
+}
+
+/* Pack effectiveness (home): group by full 4-blocker set */
+function packKey(ids) { return [...ids].sort().join("-"); }
+function packLabel(team, key) {
+  return key.split("-").map(id => { const s = skater(team, id); return s ? "#"+s.number : "?"; }).join(" ");
+}
+function renderPackTable() {
+  const team = "home";
+  const packs = {};
+  for (const j of state.jams) {
+    if (j[team].blockers.length < 2) continue; // need a real wall
+    const key = packKey(j[team].blockers);
+    packs[key] = packs[key] || { jams:0, diff:0, pf:0, pa:0 };
+    packs[key].jams++;
+    packs[key].diff += jamDiff(j, team);
+    packs[key].pf += j[team].points||0;
+    packs[key].pa += j[team==="home"?"away":"home"].points||0;
+  }
+  const rows = Object.entries(packs).map(([k,s]) => ({ k, ...s, avg:s.diff/s.jams }))
+    .sort((a,b)=> b.avg - a.avg || b.jams - a.jams);
+  const wrap = $("packTable");
+  if (!rows.length) { wrap.innerHTML = '<p class="empty">Need jams with your blocker walls logged.</p>'; return; }
+  let html = `<table><thead><tr><th>Pack (blockers)</th><th class="num">Jams</th><th class="num">PF</th><th class="num">PA</th><th class="num">Net/Jam</th></tr></thead><tbody>`;
+  rows.slice(0, 12).forEach(r => {
+    html += `<tr><td>${escapeHtml(packLabel(team, r.k))}</td><td class="num">${r.jams}</td>` +
+            `<td class="num">${r.pf}</td><td class="num">${r.pa}</td><td class="num">${diffCell(+r.avg.toFixed(1))}</td></tr>`;
+  });
+  html += `</tbody></table>`;
+  wrap.innerHTML = html;
+}
+
+/* Your packs vs their packs */
+function renderPackVsTable() {
+  const combos = {};
+  for (const j of state.jams) {
+    if (j.home.blockers.length < 2 || j.away.blockers.length < 2) continue;
+    const hk = packKey(j.home.blockers), ak = packKey(j.away.blockers);
+    const key = hk + "@@" + ak;
+    combos[key] = combos[key] || { hk, ak, jams:0, diff:0 };
+    combos[key].jams++; combos[key].diff += jamDiff(j, "home");
+  }
+  const rows = Object.values(combos).map(c => ({ ...c, avg:c.diff/c.jams }))
+    .sort((a,b)=> b.avg - a.avg || b.jams - a.jams);
+  const wrap = $("packVsTable");
+  if (!rows.length) { wrap.innerHTML = '<p class="empty">Need jams with both teams\' walls logged.</p>'; return; }
+  let html = `<table><thead><tr><th>Your pack</th><th>vs their pack</th><th class="num">Jams</th><th class="num">Net/Jam</th></tr></thead><tbody>`;
+  rows.slice(0, 15).forEach(r => {
+    html += `<tr><td>${escapeHtml(packLabel("home", r.hk))}</td>` +
+            `<td>${escapeHtml(packLabel("away", r.ak))}</td>` +
+            `<td class="num">${r.jams}</td><td class="num">${diffCell(+r.avg.toFixed(1))}</td></tr>`;
+  });
+  html += `</tbody></table>`;
+  wrap.innerHTML = html;
+}
+
+/* Your jammers vs their packs */
+function renderJammerVsTable() {
+  const combos = {};
+  for (const j of state.jams) {
+    if (!j.home.jammer || j.away.blockers.length < 2) continue;
+    const key = j.home.jammer + "@@" + packKey(j.away.blockers);
+    combos[key] = combos[key] || { jammer:j.home.jammer, ak:packKey(j.away.blockers), jams:0, pts:0 };
+    combos[key].jams++; combos[key].pts += j.home.points||0;
+  }
+  const rows = Object.values(combos).map(c => ({ ...c, ppj:c.pts/c.jams }))
+    .sort((a,b)=> b.ppj - a.ppj || b.jams - a.jams);
+  const wrap = $("jammerVsTable");
+  if (!rows.length) { wrap.innerHTML = '<p class="empty">Need jams with your jammer vs their wall.</p>'; return; }
+  let html = `<table><thead><tr><th>Your jammer</th><th>vs their pack</th><th class="num">Jams</th><th class="num">Pts</th><th class="num">Pts/Jam</th></tr></thead><tbody>`;
+  rows.slice(0, 15).forEach(r => {
+    const s = skater("home", r.jammer);
+    const jl = s ? `#${escapeHtml(s.number)} ${escapeHtml(s.name||"")}` : "?";
+    html += `<tr><td>${jl}</td><td>${escapeHtml(packLabel("away", r.ak))}</td>` +
+            `<td class="num">${r.jams}</td><td class="num">${r.pts}</td><td class="num">${r.ppj.toFixed(1)}</td></tr>`;
+  });
+  html += `</tbody></table>`;
+  wrap.innerHTML = html;
+}
+
+/* Their packs vs our jammers — defensive view: how each opposing wall held our jammers */
+function renderTheirPacksVsJammers() {
+  const combos = {};
+  for (const j of state.jams) {
+    if (j.away.blockers.length < 2 || !j.home.jammer) continue;
+    const key = packKey(j.away.blockers);
+    const o = combos[key] || (combos[key] = { ak: key, jams: 0, allowed: 0, theirNet: 0, jammers: {} });
+    o.jams++;
+    o.allowed += j.home.points || 0;               // points our jammers scored against them
+    o.theirNet += jamDiff(j, "away");              // their point differential
+    o.jammers[j.home.jammer] = (o.jammers[j.home.jammer] || 0) + 1;
+  }
+  const rows = Object.values(combos).map(c => {
+    const facedIds = Object.keys(c.jammers).sort((a, b) => c.jammers[b] - c.jammers[a]);
+    const faced = facedIds.map(id => { const s = skater("home", id); return s ? "#" + s.number : "?"; }).join(", ");
+    return { ...c, faced, ppjAllowed: c.allowed / c.jams, net: c.theirNet / c.jams };
+  }).sort((a, b) => a.ppjAllowed - b.ppjAllowed || b.jams - a.jams); // best defensive walls first
+  const wrap = $("theirPackVsJammerTable");
+  if (!rows.length) { wrap.innerHTML = '<p class="empty">Need jams with their wall vs your jammer.</p>'; return; }
+  let html = `<div class="tbl-scroll"><table><thead><tr><th>Their pack</th><th>Our jammers faced</th><th class="num">Jams</th><th class="num">Our pts</th><th class="num">Our pts/jam</th><th class="num">Their net/jam</th></tr></thead><tbody>`;
+  rows.slice(0, 15).forEach(r => {
+    html += `<tr><td>${escapeHtml(packLabel("away", r.ak))}</td>` +
+            `<td>${escapeHtml(r.faced)}</td>` +
+            `<td class="num">${r.jams}</td><td class="num">${r.allowed}</td>` +
+            `<td class="num">${r.ppjAllowed.toFixed(1)}</td>` +
+            `<td class="num">${diffCell(+r.net.toFixed(1))}</td></tr>`;
+  });
+  html += `</tbody></table></div>`;
+  wrap.innerHTML = html;
+}
+
+/* ----------------------------- Data ops ----------------------------- */
+$("btnExport").addEventListener("click", () => {
+  downloadFile("derby-stats.json", JSON.stringify(state, null, 2), "application/json");
+});
+function buildCsv() {
+  let csv = "period,jam,durationSec,team,jammer,blockers,pivot,points,lead,leadTimeSec,starPass,penalties,exitX,exitY\n";
+  for (const j of state.jams) {
+    for (const t of ["home","away"]) {
+      const jm = j[t].jammer ? skaterLabel(t, j[t].jammer) : "";
+      const bl = j[t].blockers.map(b => skaterLabel(t,b)).join(" ");
+      const pv = j[t].pivot ? skaterLabel(t, j[t].pivot) : "";
+      const pen = Object.entries(j[t].penalties).map(([k,v]) => skaterLabel(t,k)+":"+v).join(" ");
+      const ex = j[t].exit || {};
+      csv += [j.period, j.jamNumber, (j.durationSec!=null?j.durationSec:""), teamName(t), jm, `"${bl}"`, pv,
+              j[t].points, j[t].lead?1:0, (j[t].leadTime!=null?j[t].leadTime:""), j[t].starPass?1:0,
+              `"${pen}"`, ex.x||"", ex.y||""].join(",") + "\n";
+    }
+  }
+  return csv;
+}
+$("btnExportCsv").addEventListener("click", () => downloadFile("derby-jams.csv", buildCsv(), "text/csv"));
+
+function gameFilename() {
+  const clean = s => (s || "").replace(/[^a-z0-9]+/gi, "-").replace(/^-+|-+$/g, "") || "team";
+  const d = new Date();
+  const stamp = d.getFullYear() + "-" + String(d.getMonth()+1).padStart(2,"0") + "-" + String(d.getDate()).padStart(2,"0");
+  return `derby_${clean(state.teams.home.name || "home")}_vs_${clean(state.teams.away.name || "away")}_${stamp}`;
+}
+function exportGameFiles() {
+  const base = gameFilename();
+  const csv = buildCsv();                       // snapshot now, before any clearing
+  const json = JSON.stringify(state, null, 2);
+  downloadFile(base + ".csv", csv, "text/csv");
+  setTimeout(() => downloadFile(base + ".json", json, "application/json"), 500);
+}
+function clearGameKeepRosters() {
+  state.jams = [];
+  state.period = 1;
+  state.jamNumber = 1;
+  state.current = freshJam();  // empty lineups; rosters/team names/colors untouched
+  save();
+}
+$("endGame").addEventListener("click", () => {
+  const c = state.current;
+  const hasData = c.home.jammer || c.away.jammer || c.home.blockers.length || c.away.blockers.length || c.home.points || c.away.points;
+  if (hasData && confirm("Record the current jam before ending the game?")) {
+    $("finishJam").click(); // finalize the in-progress jam
+  }
+  if (!state.jams.length) { toast("No jams recorded yet"); return; }
+  const h = totalScore("home"), a = totalScore("away");
+  const hn = teamName("home"), an = teamName("away");
+  exportGameFiles();          // download CSV + JSON (snapshotted above)
+  clearGameKeepRosters();     // wipe the sheet for the next game, keep skater names
+  setTab("live");
+  toast(`Game over · ${hn} ${h}–${a} ${an} · exported & sheet cleared`);
+});
+function downloadFile(name, content, type) {
+  const blob = new Blob([content], { type });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  toast("Exported " + name);
+}
+$("importFile").addEventListener("change", (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const s = JSON.parse(reader.result);
+      if (!s.teams || !s.current) throw new Error("bad");
+      state = s; save(); applyTeamColors(); refreshNames(); setTab("setup");
+      toast("Game imported");
+    } catch (err) { toast("Import failed — invalid file"); }
+  };
+  reader.readAsText(file);
+  e.target.value = "";
+});
+$("btnClearSkaters").addEventListener("click", () => {
+  if (!confirm("Clear ALL skaters from both rosters? Team names and any recorded jams are kept.")) return;
+  state.teams.home.roster = [];
+  state.teams.away.roster = [];
+  save(); renderRoster("home"); renderRoster("away"); renderLive();
+  toast("Skaters cleared");
+});
+$("btnResetJams").addEventListener("click", () => {
+  if (!confirm("Delete all recorded jams? Rosters are kept.")) return;
+  state.jams = []; state.jamNumber = 1; state.period = 1; state.current = freshJam();
+  save(); renderLive(); toast("Jams cleared");
+});
+$("btnResetAll").addEventListener("click", () => {
+  if (!confirm("Reset EVERYTHING (teams, rosters, jams)?")) return;
+  state = defaultState(); save(); applyTeamColors(); refreshNames(); renderSetup(); setTab("setup");
+  toast("Everything reset");
+});
+
+/* Demo data */
+$("btnDemo").addEventListener("click", loadDemo);
+function loadDemo() {
+  state = defaultState();
+  state.teams.home = { name: "Thunder", color:"#1f8a52", roster: [] };
+  state.teams.away = { name: "Vipers", color:"#d0761d", roster: [] };
+  const mk = (nums) => nums.map(([n,nm]) => ({ id: uid(), number:String(n), name:nm }));
+  state.teams.home.roster = mk([[7,"Bolt"],[13,"Havoc"],[22,"Nova"],[31,"Riot"],[44,"Quake"],[88,"Blitz"],[5,"Ember"],[9,"Frost"]]);
+  state.teams.away.roster = mk([[3,"Sly"],[11,"Fang"],[24,"Venom"],[33,"Coil"],[47,"Hiss"],[66,"Scale"],[8,"Rattle"],[19,"Strike"]]);
+  const H = state.teams.home.roster, A = state.teams.away.roster;
+  const rnd = (arr,n)=>{ const c=[...arr]; const out=[]; for(let i=0;i<n;i++) out.push(c.splice(Math.floor(Math.random()*c.length),1)[0]); return out; };
+  const exitZones = [{x:110,y:200},{x:200,y:210},{x:290,y:200},{x:330,y:120},{x:70,y:120},{x:150,y:35}];
+  for (let i=0;i<14;i++){
+    const rec = freshJam();
+    const hj = rnd(H.filter(s=>[7,13,22].includes(+s.number)),1)[0];
+    const aj = rnd(A.filter(s=>[3,11,24].includes(+s.number)),1)[0];
+    const hb = rnd(H.filter(s=>s.id!==hj.id),4);
+    const ab = rnd(A.filter(s=>s.id!==aj.id),4);
+    rec.home.jammer=hj.id; rec.home.blockers=hb.map(s=>s.id); rec.home.pivot=hb[0].id;
+    rec.away.jammer=aj.id; rec.away.blockers=ab.map(s=>s.id); rec.away.pivot=ab[0].id;
+    rec.home.points=Math.floor(Math.random()*9);
+    rec.away.points=Math.floor(Math.random()*9);
+    // lead goes to at most one team, with a captured time-to-lead
+    const leadRoll=Math.random();
+    if(leadRoll<0.45){ rec.home.lead=true; rec.home.leadTime=+(3+Math.random()*22).toFixed(1); }
+    else if(leadRoll<0.82){ rec.away.lead=true; rec.away.leadTime=+(3+Math.random()*22).toFixed(1); }
+    rec.home.starPass = Math.random()>0.8;
+    rec.away.starPass = Math.random()>0.85;
+    rec.durationSec = +(20+Math.random()*100).toFixed(1);
+    if(Math.random()>0.6){ const p=rnd(hb,1)[0]; rec.home.penalties[p.id]=1; }
+    if(Math.random()>0.6){ const p=rnd(ab,1)[0]; rec.away.penalties[p.id]=1; }
+    const ez=exitZones[Math.floor(Math.random()*exitZones.length)];
+    rec.home.exit={x:ez.x+(Math.random()*20-10),y:ez.y+(Math.random()*16-8)};
+    const ez2=exitZones[Math.floor(Math.random()*exitZones.length)];
+    rec.away.exit={x:ez2.x+(Math.random()*20-10),y:ez2.y+(Math.random()*16-8)};
+    rec.period=1; rec.jamNumber=i+1; rec.id=uid();
+    state.jams.push(rec);
+  }
+  state.jamNumber = 15;
+  state.current = freshJam(state.jams[state.jams.length-1]);
+  save(); applyTeamColors(); refreshNames(); renderSetup(); setTab("insights");
+  toast("Demo game loaded");
+}
+
+/* ----------------------------- Multi-device live sync ----------------------------- */
+function syncConnect(room, role) {
+  if (typeof mqtt === "undefined") { setSyncStatus("Sync library didn't load — check internet, then reload the page.", "err"); return; }
+  if (!room) { toast("Enter a room code"); return; }
+  syncDisconnect();
+  syncRoom = room; syncRole = role;
+  setSyncStatus("Connecting…", "wait"); updateSyncUI();
+  const clientId = "jt_" + Math.random().toString(16).slice(2, 10);
+  let client;
+  try {
+    client = mqtt.connect(SYNC_BROKER, { clientId, clean: true, keepalive: 30, connectTimeout: 8000, reconnectPeriod: 3000 });
+  } catch (e) { setSyncStatus("Connection failed: " + (e && e.message || e), "err"); return; }
+  syncClient = client;
+  client.on("connect", () => {
+    setSyncStatus((role === "host" ? "Hosting" : "Viewing") + " · room " + room, "live");
+    updateSyncUI();
+    if (role === "view") client.subscribe(SYNC_TOPIC(room), { qos: 1 });
+    else syncPublishNow(); // push current state so viewers get it immediately (retained)
+  });
+  client.on("message", (t, payload) => {
+    if (syncRole !== "view") return;
+    try { applyRemoteState(JSON.parse(payload.toString())); } catch (e) {}
+  });
+  client.on("reconnect", () => setSyncStatus("Reconnecting…", "wait"));
+  client.on("error", (e) => setSyncStatus("Error: " + (e && e.message || e), "err"));
+  client.on("close", () => { if (syncClient) setSyncStatus("Offline — retrying…", "wait"); });
+}
+function syncPublish() {
+  if (!syncClient || syncRole !== "host") return;
+  clearTimeout(syncPubTimer);
+  syncPubTimer = setTimeout(syncPublishNow, 250); // debounce rapid inputs
+}
+function syncPublishNow() {
+  if (!syncClient || syncRole !== "host") return;
+  try { syncClient.publish(SYNC_TOPIC(syncRoom), JSON.stringify(state), { qos: 1, retain: true }); } catch (e) {}
+}
+function syncDisconnect() {
+  clearTimeout(syncPubTimer);
+  if (syncClient) { try { syncClient.end(true); } catch (e) {} syncClient = null; }
+  syncRole = null; syncRoom = null;
+  setViewerMode(false);
+  setSyncStatus("Not connected", "off");
+  updateSyncUI();
+}
+function applyRemoteState(s) {
+  if (!s || !s.teams || !s.current) return;
+  state = s;
+  try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch (e) {}
+  applyTeamColors(); refreshNames(); refreshScores();
+  const active = document.querySelector(".view.active");
+  if (!active) return;
+  if (active.id === "view-insights") renderInsights();
+  else if (active.id === "view-live") renderLive();
+  else renderSetup();
+}
+function setViewerMode(on) {
+  viewerMode = on;
+  document.body.classList.toggle("viewer", on);
+}
+function setSyncStatus(text, kind) {
+  const cls = "sync-dot " + (kind === "live" ? "live" : kind === "err" ? "err" : kind === "wait" ? "wait" : "");
+  const dot = $("syncDot"), txt = $("syncStatusText");
+  if (dot) dot.className = cls;
+  if (txt) txt.textContent = text;
+  const hdr = $("hdrSync");
+  if (hdr) {
+    const connected = !!syncClient;
+    hdr.style.display = connected ? "flex" : "none";
+    const hdot = $("hdrSyncDot"), htxt = $("hdrSyncText");
+    if (hdot) hdot.className = cls;
+    if (htxt) htxt.textContent = connected ? ((syncRole === "host" ? "Hosting " : "Viewing ") + (syncRoom || "")) : "";
+  }
+}
+function updateSyncUI() {
+  const connected = !!syncClient;
+  $("syncSetup").style.display = connected ? "none" : "block";
+  $("syncConnected").style.display = connected ? "block" : "none";
+  if (connected) {
+    $("roomCodeShow").textContent = syncRoom || "------";
+    $("roleHint").textContent = syncRole === "host"
+      ? "You're the scorekeeper — your inputs broadcast live. Share the code or invite link with viewers."
+      : "Viewer mode — read-only, updating live from the scorekeeper.";
+  }
+}
+function randomRoomCode() {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no confusing 0/O/1/I
+  let s = ""; for (let i = 0; i < 6; i++) s += chars[Math.floor(Math.random() * chars.length)];
+  return s;
+}
+function inviteLink() {
+  const base = (location.origin && location.origin !== "null") ? (location.origin + location.pathname) : location.href.split("#")[0];
+  return base + "#room=" + encodeURIComponent(syncRoom || "") + "&role=view";
+}
+function copyText(t) {
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(t).then(() => toast("Copied")).catch(() => prompt("Copy this:", t));
+  else prompt("Copy this:", t);
+}
+$("genCode").addEventListener("click", () => { $("roomInput").value = randomRoomCode(); });
+$("hostBtn").addEventListener("click", () => {
+  let code = ($("roomInput").value || "").trim().toUpperCase();
+  if (!code) { code = randomRoomCode(); $("roomInput").value = code; }
+  setViewerMode(false);
+  syncConnect(code, "host");
+});
+$("joinBtn").addEventListener("click", () => {
+  const code = ($("roomInput").value || "").trim().toUpperCase();
+  if (!code) { toast("Enter the room code from the scorekeeper"); return; }
+  setViewerMode(true);
+  syncConnect(code, "view");
+  setTab("insights");
+});
+$("copyCode").addEventListener("click", () => copyText(syncRoom || ""));
+$("copyLink").addEventListener("click", () => copyText(inviteLink()));
+$("leaveBtn").addEventListener("click", () => { syncDisconnect(); toast("Disconnected"); });
+
+/* ----------------------------- Init ----------------------------- */
+applyTeamColors();
+refreshNames();
+setTab("live");
+updateSyncUI();
+(function autoJoinFromHash() {
+  const p = new URLSearchParams(location.hash.replace(/^#/, ""));
+  const room = (p.get("room") || "").toUpperCase();
+  const role = p.get("role");
+  if (!room) return;
+  $("roomInput").value = room;
+  if (role === "view") { setViewerMode(true); syncConnect(room, "view"); setTab("insights"); }
+  else if (role === "host") { syncConnect(room, "host"); }
+})();
+</script>
+</body>
+</html>
